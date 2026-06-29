@@ -43,11 +43,12 @@ function isRepeatableSocket(socketName) {
 }
 
 function buildOutlineBox(w, h, d) {
-  const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w * 1.08 + 0.02, h * 1.08 + 0.02, d * 1.08 + 0.02));
+  const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w * 1.12 + 0.03, h * 1.12 + 0.03, d * 1.12 + 0.03));
   const mat = new THREE.LineBasicMaterial({ color: 0xff6a00, linewidth: 2, depthTest: false });
   const line = new THREE.LineSegments(geo, mat);
   line.renderOrder = 999;
   line.userData.isOutline = true;
+  line.raycast = () => {}; // nunca debe ser clickeable/seleccionable — solo es un indicador visual
   return line;
 }
 
@@ -674,6 +675,7 @@ export default function BoothPlannerV2() {
       target, getRadiusThetaPhi: () => ({ radius, theta, phi }),
       setRadiusThetaPhi: (r, t, p) => { radius = r; theta = t; phi = p; updateCamera(); },
       getActiveCamera: () => activeCam,
+      syncSize: onResize,
       setView: (name) => { setView(name); threeRef.current.viewName = name; setViewUIRef.current && setViewUIRef.current(name); },
       resetCamera: () => {
         target.set(0, 0, 0);
@@ -1030,6 +1032,18 @@ export default function BoothPlannerV2() {
   // ===================== Selected item ops =====================
   const selectedItem = items.find((i) => i.uid === selectedUid);
   const selectedDef = selectedItem && findDef(selectedItem.kind, selectedItem.catalogId);
+  const rightPanelOpen = !!(selectedItem && selectedDef);
+
+  // El panel derecho cambia el ancho disponible del canvas; el <canvas> de Three.js
+  // tiene un tamaño en píxeles fijado imperativamente, así que hay que recalcularlo
+  // a mano cada vez que ese panel aparece/desaparece (si no, el canvas queda con el
+  // tamaño viejo y tapa visualmente al panel hasta que se redimensiona la ventana).
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      threeRef.current.syncSize && threeRef.current.syncSize();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [rightPanelOpen]);
 
   const updateSelected = (patch) => setItems((prev) => prev.map((it) => (it.uid === selectedUid ? { ...it, ...patch } : it)));
   const rotateSelected = () => selectedItem && updateSelected({ rotY: selectedItem.rotY + Math.PI / 2 });
