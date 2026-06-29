@@ -16,26 +16,26 @@ const fmt = (n) => (Math.round(n * 100) / 100).toString();
 // In production this comes from /models/manifest.json in your repo:
 // [{ id, name, file, w, d, h, color, sockets:[{name, accessoryId}] }, ...]
 const DEFAULT_MANIFEST = [
-  { id: "backdrop_straight", name: "Backdrop recto", file: null, w: 3, d: 0.2, h: 2.4, color: "#3a6ea5", sockets: ["socket_lamp", "socket_shelf"] },
-  { id: "backdrop_curve", name: "Backdrop curvo", file: null, w: 2.4, d: 0.6, h: 2.4, color: "#3a6ea5", sockets: ["socket_lamp"] },
+  { id: "backdrop_straight", name: "Straight Backdrop", file: null, w: 3, d: 0.2, h: 2.4, color: "#3a6ea5", sockets: ["socket_lamp", "socket_shelf"] },
+  { id: "backdrop_curve", name: "Curved Backdrop", file: null, w: 2.4, d: 0.6, h: 2.4, color: "#3a6ea5", sockets: ["socket_lamp"] },
   { id: "booth_moduluxe_a", name: "Booth Moduluxe A", file: null, w: 2, d: 2, h: 2.6, color: "#c4622d", sockets: ["socket_shelf"] },
   { id: "booth_moduluxe_b", name: "Booth Moduluxe B", file: null, w: 3, d: 1.5, h: 2.6, color: "#c4622d", sockets: [] },
   { id: "counter", name: "Counter", file: null, w: 1.2, d: 0.6, h: 1.05, color: "#777777", sockets: [] },
 ];
 
 const PRIMITIVES = [
-  { id: "prim_box", name: "Cubo", kind: "box", w: 1, d: 1, h: 1 },
-  { id: "prim_cyl", name: "Cilindro", kind: "cylinder", w: 1, d: 1, h: 1.5 },
-  { id: "prim_sphere", name: "Esfera", kind: "sphere", w: 1, d: 1, h: 1 },
-  { id: "prim_plane", name: "Plano", kind: "plane", w: 1, d: 1, h: 0.02 },
+  { id: "prim_box", name: "Cube", kind: "box", w: 1, d: 1, h: 1 },
+  { id: "prim_cyl", name: "Cylinder", kind: "cylinder", w: 1, d: 1, h: 1.5 },
+  { id: "prim_sphere", name: "Sphere", kind: "sphere", w: 1, d: 1, h: 1 },
+  { id: "prim_plane", name: "Plane", kind: "plane", w: 1, d: 1, h: 0.02 },
 ];
 
 // Props: objetos pequeños con posición/altura libres, que se pueden "pegar" (attach) a otro objeto arrastrándolos encima.
 const PROPS = [
-  { id: "prop_plant", name: "Planta", kind: "cylinder", w: 0.4, d: 0.4, h: 0.7, color: "#3f7d44" },
-  { id: "prop_screen", name: "Pantalla", kind: "box", w: 0.9, d: 0.06, h: 0.55, color: "#1a1a1a" },
-  { id: "prop_sign", name: "Letrero", kind: "box", w: 0.5, d: 0.05, h: 0.3, color: "#d9c46a" },
-  { id: "prop_chair", name: "Silla", kind: "box", w: 0.45, d: 0.45, h: 0.45, color: "#8a5a3b" },
+  { id: "prop_plant", name: "Plant", kind: "cylinder", w: 0.4, d: 0.4, h: 0.7, color: "#3f7d44" },
+  { id: "prop_screen", name: "Screen", kind: "box", w: 0.9, d: 0.06, h: 0.55, color: "#1a1a1a" },
+  { id: "prop_sign", name: "Sign", kind: "box", w: 0.5, d: 0.05, h: 0.3, color: "#d9c46a" },
+  { id: "prop_chair", name: "Chair", kind: "box", w: 0.45, d: 0.45, h: 0.45, color: "#8a5a3b" },
 ];
 
 function isRepeatableSocket(socketName) {
@@ -80,7 +80,7 @@ const TYPE_SIZES = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT2: 4, MAT3: 9, MAT
 function parseGLB(arrayBuffer) {
   const dv = new DataView(arrayBuffer);
   const magic = dv.getUint32(0, true);
-  if (magic !== 0x46546c67) throw new Error("No es un .glb válido (magic number incorrecto)");
+  if (magic !== 0x46546c67) throw new Error("Not a valid .glb (incorrect magic number)");
   const length = dv.getUint32(8, true);
   let offset = 12;
   let json = null, bin = null;
@@ -140,7 +140,7 @@ async function buildTextureFromImage(json, bin, textureIndex) {
     texture.colorSpace = THREE.SRGBColorSpace;
     return texture;
   } catch (err) {
-    console.error("No se pudo decodificar una textura embebida:", err);
+    console.error("Could not decode an embedded texture:", err);
     return null;
   }
 }
@@ -269,7 +269,7 @@ export default function BoothPlannerV2() {
   const [unit, setUnit] = useState("m");
   const [floorW, setFloorW] = useState(10);
   const [floorD, setFloorD] = useState(8);
-  const [manifestUrl, setManifestUrl] = useState("");
+  const [manifestUrl, setManifestUrl] = useState("https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/main/models/manifest.json");
   const [catalog, setCatalog] = useState(DEFAULT_MANIFEST);
   const findDef = useCallback((kindCategory, catalogId) => {
     if (kindCategory === "model") return catalog.find((c) => c.id === catalogId);
@@ -302,20 +302,26 @@ export default function BoothPlannerV2() {
   const [manifestStatus, setManifestStatus] = useState(null); // {type:'ok'|'error', message}
   const loadManifest = useCallback(async () => {
     if (!manifestUrl) { setCatalog(DEFAULT_MANIFEST); setManifestStatus(null); return; }
-    setManifestStatus({ type: "loading", message: "Cargando…" });
+    setManifestStatus({ type: "loading", message: "Loading…" });
     try {
       const res = await fetch(manifestUrl);
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       const data = await res.json();
-      if (!Array.isArray(data)) throw new Error("El manifest no es un array JSON válido");
+      if (!Array.isArray(data)) throw new Error("The manifest is not a valid JSON array");
       setCatalog(data);
-      setManifestStatus({ type: "ok", message: `✓ ${data.length} modelos cargados` });
+      setManifestStatus({ type: "ok", message: `✓ ${data.length} models loaded` });
     } catch (err) {
-      console.error("No se pudo cargar el manifest, usando catálogo local:", err);
-      setManifestStatus({ type: "error", message: `✗ ${err.message || "Error desconocido al cargar"}` });
+      console.error("Could not load the manifest, using local catalog:", err);
+      setManifestStatus({ type: "error", message: `✗ ${err.message || "Unknown error while loading"}` });
       setCatalog(DEFAULT_MANIFEST);
     }
   }, [manifestUrl]);
+
+  // Auto-load the library on first mount
+  useEffect(() => {
+    loadManifest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ===================== Three.js setup =====================
   useEffect(() => {
@@ -810,7 +816,7 @@ export default function BoothPlannerV2() {
               )));
             }
           })
-          .catch((err) => console.error(`No se pudo cargar el modelo "${def.name}" (${def.file}):`, err));
+          .catch((err) => console.error(`Could not load model "${def.name}" (${def.file}):`, err));
       }
     };
 
@@ -1128,16 +1134,16 @@ export default function BoothPlannerV2() {
       {/* Sidebar */}
       <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderRight: "1px solid #2a2d34" }}>
         <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 2 }}>Booth Planner</h2>
-        <p style={{ fontSize: 12, color: "#888", marginBottom: 14 }}>v2 · procedural + cámaras + render</p>
+        <p style={{ fontSize: 12, color: "#888", marginBottom: 14 }}>v2 · procedural + cameras + render</p>
 
-        <Section title="Librería (GitHub)">
+        <Section title="Library (GitHub)">
           <input
-            placeholder="URL de manifest.json"
+            placeholder="manifest.json URL"
             value={manifestUrl}
             onChange={(e) => setManifestUrl(e.target.value)}
             style={inputStyle}
           />
-          <button onClick={loadManifest} style={{ ...btnStyle, marginTop: 6 }}>Cargar librería</button>
+          <button onClick={loadManifest} style={{ ...btnStyle, marginTop: 6 }}>Load library</button>
           {manifestStatus && (
             <div style={{
               fontSize: 11, marginTop: 6,
@@ -1148,7 +1154,7 @@ export default function BoothPlannerV2() {
           )}
         </Section>
 
-        <Section title={`Unidades`}>
+        <Section title="Units">
           <div style={{ display: "flex", gap: 4 }}>
             {Object.keys(UNITS).map((u) => (
               <button key={u} onClick={() => setUnit(u)} style={pillStyle(unit === u)}>{UNITS[u].label}</button>
@@ -1156,7 +1162,7 @@ export default function BoothPlannerV2() {
           </div>
         </Section>
 
-        <Section title={`Piso (${UNITS[unit].label})`}>
+        <Section title={`Floor (${UNITS[unit].label})`}>
           <div style={{ display: "flex", gap: 6 }}>
             <input type="number" min="0.5" step="0.1" value={fmt(metersTo(floorW, unit))}
               onChange={(e) => setFloorW(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} />
@@ -1166,7 +1172,7 @@ export default function BoothPlannerV2() {
           </div>
         </Section>
 
-        <Section title={`Modelos en escena: ${items.filter((it) => it.kind === "model").length}`}>
+        <Section title={`Models in scene: ${items.filter((it) => it.kind === "model").length}`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {catalog.map((cat) => (
               <div key={cat.id} style={catalogCard}>
@@ -1182,13 +1188,13 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[cat.id] && (
                   <span style={countBadgeStyle}>{itemCounts[cat.id]}</span>
                 )}
-                <button onClick={() => setPendingLineDef({ def: cat, kind: "model" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Línea</button>
+                <button onClick={() => setPendingLineDef({ def: cat, kind: "model" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
         </Section>
 
-        <Section title={`Primitivas en escena: ${items.filter((it) => it.kind === "primitive").length}`}>
+        <Section title={`Primitives in scene: ${items.filter((it) => it.kind === "primitive").length}`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {PRIMITIVES.map((p) => (
               <div key={p.id} style={catalogCard}>
@@ -1199,13 +1205,13 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[p.id] && (
                   <span style={countBadgeStyle}>{itemCounts[p.id]}</span>
                 )}
-                <button onClick={() => setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Línea</button>
+                <button onClick={() => setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
         </Section>
 
-        <Section title={`Props en escena: ${items.filter((it) => it.kind === "prop").length}`}>
+        <Section title={`Props in scene: ${items.filter((it) => it.kind === "prop").length}`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {PROPS.map((p) => (
               <div key={p.id} style={catalogCard}>
@@ -1220,22 +1226,22 @@ export default function BoothPlannerV2() {
             ))}
           </div>
           <div style={{ fontSize: 10, color: "#666", marginTop: 6 }}>
-            Arrástralos encima de otro objeto para pegarlos (se mueven con él) · al piso vacío para soltarlos
+            Drag them onto another object to attach (they move with it) · onto empty floor to detach
           </div>
         </Section>
 
         {pendingLineDef && (
           <div style={{ background: "#2d6a4f", borderRadius: 8, padding: 10, marginBottom: 16, fontSize: 12 }}>
-            <div style={{ marginBottom: 6 }}>Modo línea: <b>{pendingLineDef.def.name}</b></div>
+            <div style={{ marginBottom: 6 }}>Line mode: <b>{pendingLineDef.def.name}</b></div>
             <div style={{ color: "#cde8d9", fontSize: 11, marginBottom: 8 }}>
-              Click en el piso = inicio · mueve el mouse · scroll = cambiar cantidad ({lineCount}) · ← → = orientación · click de nuevo = confirmar
+              Click on the floor = start · move the mouse · scroll = change count ({lineCount}) · ← → = orientation · click again = confirm
             </div>
-            <button onClick={() => setPendingLineDef(null)} style={{ ...btnStyle, background: "#1b1d22" }}>Cancelar</button>
+            <button onClick={() => setPendingLineDef(null)} style={{ ...btnStyle, background: "#1b1d22" }}>Cancel</button>
           </div>
         )}
 
-        <Section title="Cámaras">
-          <button onClick={saveCamera} style={btnStyle}>+ Guardar vista actual</button>
+        <Section title="Cameras">
+          <button onClick={saveCamera} style={btnStyle}>+ Save current view</button>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
             {cameras.map((cam) => (
               <div key={cam.id} style={{ display: "flex", gap: 6 }}>
@@ -1244,7 +1250,7 @@ export default function BoothPlannerV2() {
               </div>
             ))}
           </div>
-          <button onClick={captureRender} style={{ ...btnStyle, marginTop: 8, background: "#2d6a4f" }}>📸 Capturar render PNG</button>
+          <button onClick={captureRender} style={{ ...btnStyle, marginTop: 8, background: "#2d6a4f" }}>📸 Capture PNG render</button>
         </Section>
 
       </div>
@@ -1252,16 +1258,17 @@ export default function BoothPlannerV2() {
       <div ref={mountRef} onDragOver={(e) => e.preventDefault()} onDrop={handleDrop} style={{ flex: 1, minWidth: 0, position: "relative" }}>
         {/* View gizmo */}
         <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 4, background: "rgba(27,29,34,0.85)", borderRadius: 8, padding: 6 }}>
-          {[["free", "Libre"], ["top", "Top"], ["front", "Front"], ["side", "Side"], ["iso", "Iso"]].map(([key, label]) => (
+          {[["free", "Free", "Perspective"], ["top", "Top", "Orthographic"], ["front", "Front", "Orthographic"], ["side", "Side", "Orthographic"], ["iso", "Iso", "Orthographic"]].map(([key, label, projection]) => (
             <button
               key={key}
               onClick={() => threeRef.current.setView(key)}
               style={{
-                ...btnStyle, padding: "5px 10px",
+                ...btnStyle, padding: "5px 10px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
                 background: activeView === key ? "#c4622d" : "#33363d",
               }}
             >
-              {label}
+              <span>{label}</span>
+              <span style={{ fontSize: 9, opacity: 0.7 }}>{projection}</span>
             </button>
           ))}
           <button onClick={() => threeRef.current.resetCamera()} style={{ ...btnStyle, padding: "5px 10px", background: "#33363d" }}>⟲ Reset</button>
@@ -1271,29 +1278,29 @@ export default function BoothPlannerV2() {
         <div style={{ position: "absolute", bottom: 12, right: 12, background: "rgba(27,29,34,0.85)", borderRadius: 8, padding: "10px 12px", fontSize: 11, color: "#bbb", lineHeight: 1.6, maxWidth: 280, textAlign: "right" }}>
           {pendingLineDef ? (
             <>
-              <div style={{ color: "#9ad6b4", fontWeight: 600, marginBottom: 2 }}>Modo línea</div>
-              <div>Click: inicio / confirmar</div>
-              <div>Scroll: cantidad ({lineCount})</div>
-              <div>← →: orientación (Shift = fino)</div>
-              <div>Alt: ángulo libre (sin snap 45°)</div>
+              <div style={{ color: "#9ad6b4", fontWeight: 600, marginBottom: 2 }}>Line mode</div>
+              <div>Click: start / confirm</div>
+              <div>Scroll: count ({lineCount})</div>
+              <div>← →: orientation (Shift = fine)</div>
+              <div>Alt: free angle (no 45° snap)</div>
             </>
           ) : selectedUids.length ? (
             <>
               <div style={{ color: "#9ad6b4", fontWeight: 600, marginBottom: 2 }}>
-                {selectedUids.length > 1 ? `${selectedUids.length} seleccionados` : "Seleccionado"}
+                {selectedUids.length > 1 ? `${selectedUids.length} selected` : "Selected"}
               </div>
-              <div>← →: rotar 15° (Shift = 1°)</div>
-              <div>Delete / Backspace: borrar</div>
-              <div>Ctrl/Cmd + D: duplicar</div>
-              <div>Shift+click: agregar/quitar selección</div>
-              <div>Click der + arrastrar: girar cámara</div>
+              <div>← →: rotate 15° (Shift = 1°)</div>
+              <div>Delete / Backspace: delete</div>
+              <div>Ctrl/Cmd + D: duplicate</div>
+              <div>Shift+click: add/remove from selection</div>
+              <div>Right-click + drag: orbit camera</div>
             </>
           ) : (
             <>
-              <div>Click: seleccionar/mover</div>
-              <div>Shift+click: multi-selección</div>
-              <div>Click der + arrastrar: girar cámara</div>
-              <div>Click central + arrastrar: pan</div>
+              <div>Click: select/move</div>
+              <div>Shift+click: multi-select</div>
+              <div>Right-click + drag: orbit camera</div>
+              <div>Middle-click + drag: pan</div>
               <div>Scroll: zoom</div>
             </>
           )}
@@ -1306,16 +1313,16 @@ export default function BoothPlannerV2() {
           <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{selectedDef.name}</h3>
           {selectedUids.length > 1 && (
             <div style={{ fontSize: 11, color: "#c4622d", marginBottom: 8 }}>
-              {selectedUids.length} objetos seleccionados · ← → rotan a todos
+              {selectedUids.length} objects selected · ← → rotate all
             </div>
           )}
           {selectedItem.groupId && (
             <div style={{ background: "#22242a", border: "1px solid #33363d", borderRadius: 6, padding: 8, marginBottom: 8 }}>
               <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 6 }}>
-                {selectedUids.length > 1 ? "Grupo completo seleccionado" : "Pieza individual (doble click) — sigue en su grupo"}
+                {selectedUids.length > 1 ? "Whole group selected" : "Individual piece (double-click) — still part of its group"}
               </div>
               <div style={{ fontSize: 10, color: "#888", marginBottom: 6 }}>
-                Click normal en cualquier pieza = selecciona todo el grupo · Doble click = solo esa pieza
+                Normal click on any piece = selects the whole group · Double-click = just that piece
               </div>
               <button
                 onClick={() => {
@@ -1323,13 +1330,13 @@ export default function BoothPlannerV2() {
                 }}
                 style={{ ...btnStyle, width: "100%" }}
               >
-                Desagrupar {selectedUids.length > 1 ? "selección" : "esta pieza"}
+                Ungroup {selectedUids.length > 1 ? "selection" : "this piece"}
               </button>
             </div>
           )}
           {selectedUids.length === 1 ? (
             <>
-              <label style={labelStyle}>Posición ({UNITS[unit].label})</label>
+              <label style={labelStyle}>Position ({UNITS[unit].label})</label>
               <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
                 <input type="number" step="0.1" value={fmt(metersTo(selectedItem.x, unit))}
                   onChange={(e) => updateSelected({ x: toMeters(parseFloat(e.target.value) || 0, unit) })} style={inputStyle} placeholder="x" />
@@ -1345,14 +1352,14 @@ export default function BoothPlannerV2() {
 
           {selectedItem.kind === "primitive" && selectedUids.length === 1 && (
             <>
-              <label style={labelStyle}>Tamaño ({UNITS[unit].label})</label>
+              <label style={labelStyle}>Size ({UNITS[unit].label})</label>
               <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
                 <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem.w ?? selectedDef.w, unit))}
-                  onChange={(e) => updateSelected({ w: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="ancho" />
+                  onChange={(e) => updateSelected({ w: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="width" />
                 <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem.d ?? selectedDef.d, unit))}
-                  onChange={(e) => updateSelected({ d: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="fondo" />
+                  onChange={(e) => updateSelected({ d: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="depth" />
                 <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem.h ?? selectedDef.h, unit))}
-                  onChange={(e) => updateSelected({ h: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="alto" />
+                  onChange={(e) => updateSelected({ h: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="height" />
               </div>
             </>
           )}
@@ -1362,9 +1369,9 @@ export default function BoothPlannerV2() {
               {selectedItem.parentUid ? (
                 <div style={{ background: "#22242a", border: "1px solid #33363d", borderRadius: 6, padding: 8, marginBottom: 12 }}>
                   <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 6 }}>
-                    Pegado a: {(() => { const pIt = items.find((i) => i.uid === selectedItem.parentUid); const pDef = pIt && findDef(pIt.kind, pIt.catalogId); return pDef ? pDef.name : "objeto"; })()}
+                    Attached to: {(() => { const pIt = items.find((i) => i.uid === selectedItem.parentUid); const pDef = pIt && findDef(pIt.kind, pIt.catalogId); return pDef ? pDef.name : "object"; })()}
                   </div>
-                  <label style={labelStyle}>Altura ({UNITS[unit].label})</label>
+                  <label style={labelStyle}>Height ({UNITS[unit].label})</label>
                   <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
                     <input type="number" step="0.05" value={fmt(metersTo(selectedItem.localOffset.y, unit))}
                       onChange={(e) => updateSelected({ localOffset: { ...selectedItem.localOffset, y: toMeters(parseFloat(e.target.value) || 0, unit) } })}
@@ -1374,23 +1381,23 @@ export default function BoothPlannerV2() {
                     onClick={() => updateSelected({ parentUid: null, localOffset: null, yOffset: selectedItem.localOffset.y })}
                     style={{ ...btnStyle, width: "100%" }}
                   >
-                    Soltar (despegar)
+                    Detach
                   </button>
                 </div>
               ) : (
                 <>
-                  <label style={labelStyle}>Altura libre ({UNITS[unit].label})</label>
+                  <label style={labelStyle}>Free height ({UNITS[unit].label})</label>
                   <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
                     <input type="number" step="0.05" value={fmt(metersTo(selectedItem.yOffset || 0, unit))}
                       onChange={(e) => updateSelected({ yOffset: toMeters(parseFloat(e.target.value) || 0, unit) })} style={inputStyle} />
                   </div>
-                  <div style={{ fontSize: 10, color: "#666", marginBottom: 12 }}>Arrástralo encima de otro objeto para pegarlo a él</div>
+                  <div style={{ fontSize: 10, color: "#666", marginBottom: 12 }}>Drag it onto another object to attach it</div>
                 </>
               )}
             </>
           )}
 
-          <label style={labelStyle}>Rotación</label>
+          <label style={labelStyle}>Rotation</label>
           <div style={{ fontSize: 11, color: "#777", marginBottom: 4 }}>← → = 15° · Shift + ← → = 1°</div>
           {selectedUids.length === 1 && (
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
@@ -1408,7 +1415,7 @@ export default function BoothPlannerV2() {
 
           {selectedItem.kind === "model" && selectedDef.sockets && selectedDef.sockets.length > 0 && (
             <>
-              <label style={labelStyle}>Accesorios</label>
+              <label style={labelStyle}>Accessories</label>
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
                 {selectedDef.sockets.map((s) => {
                   const repeatable = isRepeatableSocket(s);
@@ -1422,19 +1429,19 @@ export default function BoothPlannerV2() {
                       {repeatable && cfg && cfg.enabled && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4, marginLeft: 20 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Cantidad</span>
+                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Count</span>
                             <button onClick={() => updateSocketConfig(s, { count: Math.max(1, cfg.count - 1) })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>-</button>
                             <span style={{ fontSize: 12, width: 20, textAlign: "center" }}>{cfg.count}</span>
                             <button onClick={() => updateSocketConfig(s, { count: cfg.count + 1 })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>+</button>
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Separación</span>
+                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Spacing</span>
                             <input type="number" min="0.05" step="0.05" value={fmt(metersTo(cfg.spacing, unit))}
                               onChange={(e) => updateSocketConfig(s, { spacing: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })}
                               style={{ ...inputStyle, padding: "2px 6px" }} />
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Altura base</span>
+                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Base height</span>
                             <input type="number" min="0" step="0.05" value={fmt(metersTo(cfg.baseHeight, unit))}
                               onChange={(e) => updateSocketConfig(s, { baseHeight: Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit)) })}
                               style={{ ...inputStyle, padding: "2px 6px" }} />
@@ -1450,17 +1457,17 @@ export default function BoothPlannerV2() {
 
           <label style={labelStyle}>Array</label>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <input type="number" min="1" value={arrayCount} onChange={(e) => setArrayCount(parseInt(e.target.value) || 1)} style={inputStyle} placeholder="cant." />
-            <input type="number" min="0.1" step="0.1" value={fmt(metersTo(arraySpacing, unit))} onChange={(e) => setArraySpacing(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} placeholder="espaciado" />
+            <input type="number" min="1" value={arrayCount} onChange={(e) => setArrayCount(parseInt(e.target.value) || 1)} style={inputStyle} placeholder="qty." />
+            <input type="number" min="0.1" step="0.1" value={fmt(metersTo(arraySpacing, unit))} onChange={(e) => setArraySpacing(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} placeholder="spacing" />
           </div>
-          <button onClick={makeArray} style={{ ...btnStyle, marginBottom: 12, width: "100%" }}>Crear array</button>
+          <button onClick={makeArray} style={{ ...btnStyle, marginBottom: 12, width: "100%" }}>Create array</button>
 
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <button onClick={rotateSelected} style={btnStyle}>Rotar 90°</button>
-            <button onClick={duplicateSelected} style={btnStyle}>Duplicar</button>
-            <button onClick={() => setShowReplaceMenu((s) => !s)} style={btnStyle}>Reemplazar</button>
+            <button onClick={rotateSelected} style={btnStyle}>Rotate 90°</button>
+            <button onClick={duplicateSelected} style={btnStyle}>Duplicate</button>
+            <button onClick={() => setShowReplaceMenu((s) => !s)} style={btnStyle}>Replace</button>
           </div>
-          <div style={{ fontSize: 10, color: "#666", marginBottom: 6 }}>Atajo: Ctrl/Cmd + D</div>
+          <div style={{ fontSize: 10, color: "#666", marginBottom: 6 }}>Shortcut: Ctrl/Cmd + D</div>
           {showReplaceMenu && (
             <div style={{ background: "#22242a", border: "1px solid #33363d", borderRadius: 6, padding: 6, marginBottom: 6, maxHeight: 140, overflowY: "auto" }}>
               {[...catalog.map((c) => ({ def: c, kind: "model" })), ...PRIMITIVES.map((p) => ({ def: p, kind: "primitive" }))].map(({ def, kind }) => (
@@ -1470,7 +1477,7 @@ export default function BoothPlannerV2() {
               ))}
             </div>
           )}
-          <button onClick={deleteSelected} style={{ ...btnStyle, background: "#5a2424", width: "100%" }}>Borrar objeto</button>
+          <button onClick={deleteSelected} style={{ ...btnStyle, background: "#5a2424", width: "100%" }}>Delete object</button>
         </div>
       )}
     </div>
