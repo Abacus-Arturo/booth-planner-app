@@ -471,7 +471,9 @@ export default function BoothPlannerV2() {
     const clearGhosts = () => {
       while (ghostGroup.children.length) {
         const c = ghostGroup.children.pop();
-        c.geometry.dispose(); c.material.dispose();
+        c.traverse((child) => {
+          if (child.isMesh) { child.geometry.dispose(); child.material.dispose(); }
+        });
       }
     };
     const raycaster = new THREE.Raycaster();
@@ -504,6 +506,16 @@ export default function BoothPlannerV2() {
         const ghost = new THREE.Mesh(geo, mat);
         ghost.position.set(pos.x, def.h / 2, pos.z);
         ghost.rotation.y = baseAngle;
+
+        // Flecha que indica hacia dónde queda viendo el frente del objeto (eje local +Z)
+        const arrow = new THREE.Mesh(
+          new THREE.ConeGeometry(0.08, 0.22, 8),
+          new THREE.MeshBasicMaterial({ color: 0x00e5ff })
+        );
+        arrow.rotation.x = Math.PI / 2; // el cono por default apunta a +Y; lo orientamos a +Z
+        arrow.position.set(0, 0, (def.d || 0.3) / 2 + 0.2);
+        ghost.add(arrow);
+
         ghostGroup.add(ghost);
       }
     };
@@ -797,9 +809,11 @@ export default function BoothPlannerV2() {
             applyColorToContainer(root, it.color || def.color || "#888888");
             applySocketVisibility(root, it.sockets);
             // recalcular el contorno con el tamaño real del modelo cargado (bounding box)
+            container.updateMatrixWorld(true);
             const box = new THREE.Box3().setFromObject(root);
             const size = box.getSize(new THREE.Vector3());
             const center = box.getCenter(new THREE.Vector3());
+            container.worldToLocal(center); // el bbox viene en espacio mundo; el contorno se posiciona en espacio local del container
             container.remove(container.userData.outline);
             container.userData.outline.geometry.dispose(); container.userData.outline.material.dispose();
             const newOutline = buildOutlineBox(size.x, size.y, size.z);
