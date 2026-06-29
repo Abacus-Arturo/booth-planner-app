@@ -523,6 +523,9 @@ export default function BoothPlannerV2() {
     // (la rotación de los ghosts de línea con flechas se maneja en un único listener a nivel React, más abajo)
     let draggingUid = null;
     const dragOffsetsRef = { current: {} };
+    let dragArmed = false; // solo cuenta como "arrastre" real una vez que pasas el umbral de píxeles
+    let dragStartScreenX = 0, dragStartScreenY = 0;
+    const DRAG_THRESHOLD_PX = 5;
     const onDownSelect = (e) => {
       if (e.button !== 0) return;
       // ---- Line tool flow ----
@@ -569,6 +572,8 @@ export default function BoothPlannerV2() {
         let obj = hits[0].object;
         while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
         draggingUid = obj.userData.uid;
+        dragArmed = false;
+        dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
         const clickedItem = itemsRef.current.find((it) => it.uid === draggingUid);
         const groupId = clickedItem && clickedItem.groupId;
         if (groupId && !e.shiftKey) {
@@ -608,6 +613,11 @@ export default function BoothPlannerV2() {
         return;
       }
       if (!draggingUid) return;
+      if (!dragArmed) {
+        const dx = e.clientX - dragStartScreenX, dy = e.clientY - dragStartScreenY;
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return; // todavía es un click, no un arrastre real
+        dragArmed = true;
+      }
       const draggedItem = itemsRef.current.find((it) => it.uid === draggingUid);
       if (draggedItem && draggedItem.kind === "prop") {
         const rect = dom.getBoundingClientRect();
