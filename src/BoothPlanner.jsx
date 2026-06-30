@@ -314,6 +314,8 @@ export default function BoothPlannerV2() {
   }, [catalog]);
   const [items, setItems] = useState([]); // {uid, catalogId, kind, x,z,rotY,color,sockets,groupId}
   const [walls, setWalls] = useState([]); // {uid, x1,z1,x2,z2, height, glassRatio, thickness, color}
+  const wallsRef = useRef(walls);
+  useEffect(() => { wallsRef.current = walls; }, [walls]);
   const itemsRef = useRef(items);
   useEffect(() => { itemsRef.current = items; }, [items]);
   const [selectedUids, setSelectedUids] = useState([]); // array de uids
@@ -568,6 +570,9 @@ export default function BoothPlannerV2() {
     // (la rotación de los ghosts de línea con flechas se maneja en un único listener a nivel React, más abajo)
     let draggingUid = null;
     const dragOffsetsRef = { current: {} };
+    let draggingWallUid = null;
+    let wallDragStartPt = null;
+    let wallDragOrigX1 = 0, wallDragOrigZ1 = 0, wallDragOrigX2 = 0, wallDragOrigZ2 = 0;
     let dragArmed = false; // solo cuenta como "arrastre" real una vez que pasas el umbral de píxeles
     let dragStartScreenX = 0, dragStartScreenY = 0;
     const DRAG_THRESHOLD_PX = 5;
@@ -642,8 +647,19 @@ export default function BoothPlannerV2() {
       if (wallHits.length) {
         let obj = wallHits[0].object;
         while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
-        threeRef.current.setSelectedWall(obj.userData.wallUid);
+        const wuid = obj.userData.wallUid;
+        threeRef.current.setSelectedWall(wuid);
         threeRef.current.setSelected(null);
+        // preparar drag de la pared
+        const wallData = wallsRef.current.find((w) => w.uid === wuid);
+        if (wallData) {
+          draggingWallUid = wuid;
+          dragArmed = false;
+          dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
+          wallDragStartPt = groundPoint(e.clientX, e.clientY);
+          wallDragOrigX1 = wallData.x1; wallDragOrigZ1 = wallData.z1;
+          wallDragOrigX2 = wallData.x2; wallDragOrigZ2 = wallData.z2;
+        }
         return;
       }
       const hits = raycaster.intersectObjects(itemGroup.children, true);
@@ -693,6 +709,18 @@ export default function BoothPlannerV2() {
         threeRef.current.updateWallGhost(wallStateRef.current.start, wallStateRef.current.end, wallConfigRef.current);
         return;
       }
+      // drag de pared seleccionada
+      if (draggingWallUid) {
+        if (!dragArmed) {
+          const dx = e.clientX - dragStartScreenX, dy = e.clientY - dragStartScreenY;
+          if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+          dragArmed = true;
+        }
+        const pt = groundPoint(e.clientX, e.clientY);
+        const dx = pt.x - wallDragStartPt.x, dz = pt.z - wallDragStartPt.z;
+        threeRef.current.moveWall(draggingWallUid, wallDragOrigX1 + dx, wallDragOrigZ1 + dz, wallDragOrigX2 + dx, wallDragOrigZ2 + dz);
+        return;
+      }
       if (lineStateRef.current.active) {
         const raw = groundPoint(e.clientX, e.clientY);
         lineStateRef.current.end = snapLineEnd(lineStateRef.current.start, raw, e.altKey);
@@ -733,7 +761,7 @@ export default function BoothPlannerV2() {
       const pt = groundPoint(e.clientX, e.clientY);
       threeRef.current.moveGroup(dragOffsetsRef.current, pt.x, pt.z);
     };
-    const onUpDrag = () => { draggingUid = null; };
+    const onUpDrag = () => { draggingUid = null; draggingWallUid = null; };
     dom.addEventListener("pointerdown", onDownSelect);
     const onDblClick = (e) => {
       if (pendingLineDefRef.current) return; // no aplica en modo línea
@@ -806,6 +834,7 @@ export default function BoothPlannerV2() {
       clearPendingLine: () => setPendingLineDef(null),
       setLineCountUI: (n) => setLineCount(n),
       commitWall: (wall) => setWalls((prev) => [...prev, wall]),
+      moveWall: (uid, x1, z1, x2, z2) => setWalls((prev) => prev.map((w) => w.uid === uid ? { ...w, x1, z1, x2, z2 } : w)),
       clearWallGhost: () => {
         const wg = threeRef.current.wallGhost;
         if (wg) { threeRef.current.scene.remove(wg); threeRef.current.wallGhost = null; }
@@ -1121,7 +1150,9 @@ export default function BoothPlannerV2() {
   // ---------------- Rotación con flechas + borrar con Delete/Backspace (multi-selección) ----------------
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.target && (e.target.tagName === "INPUT")) return;
+      // Delete/Backspace always works for walls/objects even if an input has focus,
+      // UNLESS the user is actively typing in an input (has text selected or cursor inside)
+      const inInput = e.target && e.target.tagName === "INPUT" && e.target.type !== "color" && e.target.type !== "range";
 
       if (e.key === "Escape") {
         // cancel wall tool
@@ -1134,6 +1165,7 @@ export default function BoothPlannerV2() {
       }
 
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        if (inInput) return; // no interferir mientras escribe
         const deg = e.shiftKey ? 1 : 15;
         const delta = (e.key === "ArrowLeft" ? -1 : 1) * (deg * Math.PI / 180);
         // si hay una línea activa (modo línea, punto inicial ya puesto), las flechas ajustan su orientación
@@ -1166,6 +1198,7 @@ export default function BoothPlannerV2() {
         return;
       }
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (inInput) return; // no borrar mientras escribe en un campo de texto
         e.preventDefault();
         if (selectedWallUid) {
           setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid));
