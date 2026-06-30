@@ -820,12 +820,14 @@ export default function BoothPlannerV2() {
             container.add(root);
             applyColorToContainer(root, it.color || def.color || "#888888");
             applySocketVisibility(root, it.sockets);
-            // recalcular el contorno con el tamaño real del modelo cargado (bounding box)
-            container.updateMatrixWorld(true);
-            const box = new THREE.Box3().setFromObject(root);
+            // calcular el bounding box en espacio LOCAL del root (antes de la rotación del container)
+            // para que el outline siempre tenga el tamaño correcto sin importar la rotación
+            const tempParent = new THREE.Group();
+            tempParent.add(root.clone());
+            const box = new THREE.Box3().setFromObject(tempParent.children[0]);
+            tempParent.remove(tempParent.children[0]);
             const size = box.getSize(new THREE.Vector3());
             const center = box.getCenter(new THREE.Vector3());
-            container.worldToLocal(center); // el bbox viene en espacio mundo; el contorno se posiciona en espacio local del container
             container.remove(container.userData.outline);
             container.userData.outline.geometry.dispose(); container.userData.outline.material.dispose();
             const newOutline = buildOutlineBox(size.x, size.y, size.z);
