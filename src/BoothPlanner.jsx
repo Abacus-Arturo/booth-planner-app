@@ -287,6 +287,19 @@ function getModelClone(url) {
   return loadModelOnce(url).then((scene) => scene.clone(true));
 }
 
+function measureModelDims(url) {
+  // Carga el modelo (cacheado) y mide su bounding box local, sin agregarlo a ninguna escena visible.
+  return loadModelOnce(url).then((scene) => {
+    const tempParent = new THREE.Group();
+    const clone = scene.clone(true);
+    tempParent.add(clone);
+    const box = new THREE.Box3().setFromObject(clone);
+    const size = box.getSize(new THREE.Vector3());
+    tempParent.remove(clone);
+    return { w: size.x, h: size.y, d: size.z };
+  });
+}
+
 function varyColor(hexColor, index) {
   if (index % 2 === 0) return hexColor; // color base tal cual
   const c = new THREE.Color(hexColor);
@@ -345,21 +358,45 @@ export default function BoothPlannerV2() {
   useEffect(() => { lineCountRef.current = lineCount; }, [lineCount]);
 
   // ---------------- Load manifest from GitHub (or any URL) ----------------
-  const [manifestStatus, setManifestStatus] = useState(null); // {type:'ok'|'error', message}
+  const [manifestStatus, setManifestStatus] = useState(null); // {type:'ok'|'error'|'loading', message}
+  const [libraryReady, setLibraryReady] = useState(false);
   const loadManifest = useCallback(async () => {
-    if (!manifestUrl) { setCatalog(DEFAULT_MANIFEST); setManifestStatus(null); return; }
-    setManifestStatus({ type: "loading", message: "Loading…" });
+    setLibraryReady(false);
+    if (!manifestUrl) { setCatalog(DEFAULT_MANIFEST); setManifestStatus(null); setLibraryReady(true); return; }
+    setManifestStatus({ type: "loading", message: "Loading manifest…" });
     try {
       const res = await fetch(manifestUrl);
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       const data = await res.json();
       if (!Array.isArray(data)) throw new Error("The manifest is not a valid JSON array");
       setCatalog(data);
+
+      // Prefetch every model's real GLB so the catalog has accurate sizes (w/h/d)
+      // BEFORE the user can drag/line-tool anything — avoids placeholder-sized
+      // boxes from a not-yet-loaded model being used in the line tool.
+      const modelsWithFile = data.filter((d) => d.file);
+      let loaded = 0;
+      setManifestStatus({ type: "loading", message: `Loading models… (0/${modelsWithFile.length})` });
+      await Promise.all(modelsWithFile.map((def) =>
+        measureModelDims(def.file)
+          .then((dims) => {
+            loaded++;
+            setCatalog((prev) => prev.map((c) => (c.id === def.id ? { ...c, ...dims, _measured: true } : c)));
+            setManifestStatus({ type: "loading", message: `Loading models… (${loaded}/${modelsWithFile.length})` });
+          })
+          .catch((err) => {
+            loaded++;
+            console.error(`Could not preload model "${def.name}" (${def.file}):`, err);
+          })
+      ));
+
       setManifestStatus({ type: "ok", message: `✓ ${data.length} models loaded` });
     } catch (err) {
       console.error("Could not load the manifest, using local catalog:", err);
       setManifestStatus({ type: "error", message: `✗ ${err.message || "Unknown error while loading"}` });
       setCatalog(DEFAULT_MANIFEST);
+    } finally {
+      setLibraryReady(true);
     }
   }, [manifestUrl]);
 
@@ -1382,8 +1419,8 @@ export default function BoothPlannerV2() {
         <Section title={`Models in scene: ${items.filter((it) => it.kind === "model").length}`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {catalog.map((cat) => (
-              <div key={cat.id} style={catalogCard}>
-                <div draggable onDragStart={() => setDragCatalog({ def: cat, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "grab" }}>
+              <div key={cat.id} style={{ ...catalogCard, opacity: libraryReady ? 1 : 0.4, pointerEvents: libraryReady ? "auto" : "none" }}>
+                <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: cat, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
                   <div style={{ width: 14, height: 14, borderRadius: 3, background: cat.color, flexShrink: 0 }} />
                   <div style={{ fontSize: 12 }}>
                     <div>{cat.name}</div>
@@ -1395,7 +1432,7 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[cat.id] && (
                   <span style={countBadgeStyle}>{itemCounts[cat.id]}</span>
                 )}
-                <button onClick={() => setPendingLineDef({ def: cat, kind: "model" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                <button disabled={!libraryReady} onClick={() => setPendingLineDef({ def: cat, kind: "model" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
@@ -1505,6 +1542,20 @@ export default function BoothPlannerV2() {
       </div>
 
       <div ref={mountRef} onDragOver={(e) => e.preventDefault()} onDrop={handleDrop} style={{ flex: 1, minWidth: 0, position: "relative" }}>
+        {!libraryReady && (
+          <div style={{
+            position: "absolute", inset: 0, zIndex: 50, display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", gap: 12,
+            background: "rgba(19,21,26,0.85)", backdropFilter: "blur(2px)",
+          }}>
+            <div style={{
+              width: 32, height: 32, border: "3px solid #33363d", borderTopColor: "#c4622d",
+              borderRadius: "50%", animation: "spin 0.8s linear infinite",
+            }} />
+            <style>{"@keyframes spin { to { transform: rotate(360deg); } }"}</style>
+            <div style={{ fontSize: 13, color: "#ccc" }}>{manifestStatus ? manifestStatus.message : "Loading library…"}</div>
+          </div>
+        )}
         {/* View gizmo */}
         <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 4, background: "rgba(27,29,34,0.85)", borderRadius: 8, padding: 6 }}>
           {[["free", "Free", "Perspective"], ["top", "Top", "Orthographic"], ["front", "Front", "Orthographic"], ["side", "Side", "Orthographic"], ["iso", "Iso", "Orthographic"]].map(([key, label, projection]) => (
