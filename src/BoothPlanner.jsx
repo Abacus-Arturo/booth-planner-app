@@ -42,6 +42,40 @@ function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
 }
 
+function buildWallMesh(wall) {
+  const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
+  const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
+  const angle = Math.atan2(dx, dz);
+  const h = wall.height, gr = Math.min(Math.max(wall.glassRatio, 0), 1);
+  const solidH = h * (1 - gr), glassH = h * gr;
+  const t = wall.thickness;
+  const group = new THREE.Group();
+  group.position.set((wall.x1 + wall.x2) / 2, 0, (wall.z1 + wall.z2) / 2);
+  group.rotation.y = angle;
+  // solid part
+  if (solidH > 0.001) {
+    const solidMat = new THREE.MeshStandardMaterial({ color: wall.color || "#cccccc", roughness: 0.8, metalness: 0.05 });
+    const solid = new THREE.Mesh(new THREE.BoxGeometry(len, solidH, t), solidMat);
+    solid.position.y = solidH / 2;
+    solid.castShadow = true; solid.receiveShadow = true;
+    group.add(solid);
+  }
+  // glass part
+  if (glassH > 0.001) {
+    const glassMat = new THREE.MeshPhysicalMaterial({
+      color: 0xddeeff, transparent: true, opacity: 0.25,
+      roughness: 0, metalness: 0.05,
+      transmission: 0.88, thickness: t, ior: 1.5,
+      side: THREE.DoubleSide,
+    });
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(len, glassH, t * 0.4), glassMat);
+    glass.position.y = solidH + glassH / 2;
+    group.add(glass);
+  }
+  group.userData.isWall = true;
+  return group;
+}
+
 function buildOutlineBox(w, h, d) {
   const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w * 1.12 + 0.03, h * 1.12 + 0.03, d * 1.12 + 0.03));
   const mat = new THREE.LineBasicMaterial({ color: 0xff6a00, linewidth: 2, depthTest: false });
@@ -279,6 +313,7 @@ export default function BoothPlannerV2() {
     return null;
   }, [catalog]);
   const [items, setItems] = useState([]); // {uid, catalogId, kind, x,z,rotY,color,sockets,groupId}
+  const [walls, setWalls] = useState([]); // {uid, x1,z1,x2,z2, height, glassRatio, thickness, color}
   const itemsRef = useRef(items);
   useEffect(() => { itemsRef.current = items; }, [items]);
   const [selectedUids, setSelectedUids] = useState([]); // array de uids
@@ -292,6 +327,13 @@ export default function BoothPlannerV2() {
   useEffect(() => { setViewUIRef.current = setActiveView; }, []);
   const [showReplaceMenu, setShowReplaceMenu] = useState(false);
   const [pendingLineDef, setPendingLineDef] = useState(null); // {def, kind}
+  const [wallToolActive, setWallToolActive] = useState(false);
+  const [wallConfig, setWallConfig] = useState({ height: 2.4, glassRatio: 0, thickness: 0.1, color: "#cccccc" });
+  const wallStateRef = useRef({ active: false, start: null, end: null });
+  const wallConfigRef = useRef(wallConfig);
+  useEffect(() => { wallConfigRef.current = wallConfig; }, [wallConfig]);
+  const wallToolActiveRef = useRef(false);
+  useEffect(() => { wallToolActiveRef.current = wallToolActive; }, [wallToolActive]);
   const [lineCount, setLineCount] = useState(5);
   const pendingLineDefRef = useRef(null);
   const lineCountRef = useRef(5);
@@ -466,6 +508,8 @@ export default function BoothPlannerV2() {
     // ---- Item group + drag/select ----
     const itemGroup = new THREE.Group();
     scene.add(itemGroup);
+    const wallGroup = new THREE.Group();
+    scene.add(wallGroup);
     const ghostGroup = new THREE.Group();
     scene.add(ghostGroup);
 
@@ -528,6 +572,23 @@ export default function BoothPlannerV2() {
     const DRAG_THRESHOLD_PX = 5;
     const onDownSelect = (e) => {
       if (e.button !== 0) return;
+      // ---- Wall tool flow ----
+      if (wallToolActiveRef.current) {
+        const ws = wallStateRef.current;
+        const pt = groundPoint(e.clientX, e.clientY);
+        if (!ws.active) {
+          ws.active = true; ws.start = pt.clone(); ws.end = pt.clone();
+        } else {
+          // commit wall
+          const cfg = wallConfigRef.current;
+          const uid = `wall_${Date.now()}`;
+          threeRef.current.commitWall({ uid, x1: ws.start.x, z1: ws.start.z, x2: ws.end.x, z2: ws.end.z, ...cfg });
+          ws.start = ws.end.clone(); // chain: end of this wall = start of next
+          ws.end = ws.start.clone();
+          threeRef.current.clearWallGhost();
+        }
+        return;
+      }
       // ---- Line tool flow ----
       if (pendingLineDefRef.current) {
         const ls = lineStateRef.current;
@@ -606,6 +667,12 @@ export default function BoothPlannerV2() {
       return new THREE.Vector3(start.x + Math.sin(snapped) * len, 0, start.z + Math.cos(snapped) * len);
     };
     const onMoveDrag = (e) => {
+      if (wallToolActiveRef.current && wallStateRef.current.active) {
+        const raw = groundPoint(e.clientX, e.clientY);
+        wallStateRef.current.end = e.shiftKey ? raw : snapLineEnd(wallStateRef.current.start, raw, e.altKey);
+        threeRef.current.updateWallGhost(wallStateRef.current.start, wallStateRef.current.end, wallConfigRef.current);
+        return;
+      }
       if (lineStateRef.current.active) {
         const raw = groundPoint(e.clientX, e.clientY);
         lineStateRef.current.end = snapLineEnd(lineStateRef.current.start, raw, e.altKey);
@@ -681,7 +748,7 @@ export default function BoothPlannerV2() {
     animate();
 
     threeRef.current = {
-      scene, camera, renderer, itemGroup, floor, dom,
+      scene, camera, renderer, itemGroup, wallGroup, floor, dom,
       target, getRadiusThetaPhi: () => ({ radius, theta, phi }),
       setRadiusThetaPhi: (r, t, p) => { radius = r; theta = t; phi = p; updateCamera(); },
       getActiveCamera: () => activeCam,
@@ -717,6 +784,19 @@ export default function BoothPlannerV2() {
       commitLineItems: (newItems) => setItems((prev) => [...prev, ...newItems]),
       clearPendingLine: () => setPendingLineDef(null),
       setLineCountUI: (n) => setLineCount(n),
+      commitWall: (wall) => setWalls((prev) => [...prev, wall]),
+      clearWallGhost: () => {
+        const wg = threeRef.current.wallGhost;
+        if (wg) { threeRef.current.scene.remove(wg); threeRef.current.wallGhost = null; }
+      },
+      updateWallGhost: (start, end, cfg) => {
+        const wg = threeRef.current.wallGhost;
+        if (wg) threeRef.current.scene.remove(wg);
+        const ghost = buildWallMesh({ x1: start.x, z1: start.z, x2: end.x, z2: end.z, ...cfg });
+        ghost.traverse((c) => { if (c.isMesh) { c.material = c.material.clone(); c.material.transparent = true; c.material.opacity = 0.45; } });
+        threeRef.current.scene.add(ghost);
+        threeRef.current.wallGhost = ghost;
+      },
       adjustLineAngle: (delta) => {
         if (!lineStateRef.current.active) return false;
         lineAngleOffsetRef.current += delta;
@@ -749,6 +829,21 @@ export default function BoothPlannerV2() {
     if (!floor) return;
     floor.scale.set(floorW, floorD, 1);
   }, [floorW, floorD]);
+
+  // ===================== Sync walls -> meshes =====================
+  useEffect(() => {
+    const { wallGroup } = threeRef.current;
+    if (!wallGroup) return;
+    const currentUids = new Set(walls.map((w) => w.uid));
+    wallGroup.children.filter((c) => !currentUids.has(c.userData.wallUid)).forEach((c) => wallGroup.remove(c));
+    walls.forEach((wall) => {
+      let mesh = wallGroup.children.find((c) => c.userData.wallUid === wall.uid);
+      if (mesh) wallGroup.remove(mesh); // siempre reconstruir (es procedural, es barato)
+      mesh = buildWallMesh(wall);
+      mesh.userData.wallUid = wall.uid;
+      wallGroup.add(mesh);
+    });
+  }, [walls]);
 
   // ===================== Sync items -> meshes (GLB real con caché + placeholder mientras carga) =====================
   const loadedUidsRef = useRef(new Set()); // evita relanzar la carga si ya se está cargando ese uid
@@ -991,7 +1086,17 @@ export default function BoothPlannerV2() {
   // ---------------- Rotación con flechas + borrar con Delete/Backspace (multi-selección) ----------------
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.target && (e.target.tagName === "INPUT")) return; // evita interferir mientras escribes
+      if (e.target && (e.target.tagName === "INPUT")) return;
+
+      if (e.key === "Escape") {
+        // cancel wall tool
+        if (wallToolActive) {
+          wallStateRef.current = { active: false, start: null, end: null };
+          threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
+          setWallToolActive(false);
+        }
+        return;
+      }
 
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         const deg = e.shiftKey ? 1 : 15;
@@ -1033,7 +1138,7 @@ export default function BoothPlannerV2() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedUids]);
+  }, [selectedUids, wallToolActive]);
 
   const itemCounts = React.useMemo(() => {
     const m = {};
@@ -1045,17 +1150,6 @@ export default function BoothPlannerV2() {
   const selectedItem = items.find((i) => i.uid === selectedUid);
   const selectedDef = selectedItem && findDef(selectedItem.kind, selectedItem.catalogId);
   const rightPanelOpen = !!(selectedItem && selectedDef);
-
-  // El panel derecho cambia el ancho disponible del canvas; el <canvas> de Three.js
-  // tiene un tamaño en píxeles fijado imperativamente, así que hay que recalcularlo
-  // a mano cada vez que ese panel aparece/desaparece (si no, el canvas queda con el
-  // tamaño viejo y tapa visualmente al panel hasta que se redimensiona la ventana).
-  useEffect(() => {
-    const raf = requestAnimationFrame(() => {
-      threeRef.current.syncSize && threeRef.current.syncSize();
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [rightPanelOpen]);
 
   const updateSelected = (patch) => setItems((prev) => prev.map((it) => (it.uid === selectedUid ? { ...it, ...patch } : it)));
   const rotateSelected = () => selectedItem && updateSelected({ rotY: selectedItem.rotY + Math.PI / 2 });
@@ -1280,6 +1374,48 @@ export default function BoothPlannerV2() {
           </div>
         )}
 
+        <Section title="Wall Tool">
+          <button
+            onClick={() => {
+              setWallToolActive((v) => {
+                if (v) { // canceling
+                  wallStateRef.current = { active: false, start: null, end: null };
+                  threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
+                }
+                return !v;
+              });
+            }}
+            style={{ ...btnStyle, width: "100%", marginBottom: 8, background: wallToolActive ? "#c4622d" : "#33363d" }}
+          >
+            {wallToolActive ? "⬛ Stop drawing" : "🧱 Draw Wall"}
+          </button>
+          {wallToolActive && (
+            <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 8 }}>
+              Click: set start · move · click: place · chain continues · Esc: finish
+            </div>
+          )}
+          <label style={labelStyle}>Height ({UNITS[unit].label})</label>
+          <input type="number" min="0.1" step="0.1" value={fmt(metersTo(wallConfig.height, unit))}
+            onChange={(e) => setWallConfig((c) => ({ ...c, height: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={{ ...inputStyle, marginBottom: 8 }} />
+          <label style={labelStyle}>Glass ratio (0 = solid · 1 = all glass)</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <input type="range" min="0" max="1" step="0.05" value={wallConfig.glassRatio}
+              onChange={(e) => setWallConfig((c) => ({ ...c, glassRatio: parseFloat(e.target.value) }))}
+              style={{ flex: 1 }} />
+            <span style={{ fontSize: 11, color: "#999", width: 32 }}>{Math.round(wallConfig.glassRatio * 100)}%</span>
+          </div>
+          <label style={labelStyle}>Thickness ({UNITS[unit].label})</label>
+          <input type="number" min="0.02" step="0.02" value={fmt(metersTo(wallConfig.thickness, unit))}
+            onChange={(e) => setWallConfig((c) => ({ ...c, thickness: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={{ ...inputStyle, marginBottom: 8 }} />
+          <label style={labelStyle}>Color</label>
+          <input type="color" value={wallConfig.color}
+            onChange={(e) => setWallConfig((c) => ({ ...c, color: e.target.value }))}
+            style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 4 }} />
+          {walls.length > 0 && (
+            <button onClick={() => setWalls([])} style={{ ...btnStyle, background: "#5a2424", width: "100%", marginTop: 4 }}>Clear all walls</button>
+          )}
+        </Section>
+
         <Section title="Cameras">
           <button onClick={saveCamera} style={btnStyle}>+ Save current view</button>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
@@ -1348,8 +1484,10 @@ export default function BoothPlannerV2() {
       </div>
 
       {/* Right panel: selected item properties */}
-      {selectedItem && selectedDef && (
-        <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderLeft: "1px solid #2a2d34" }}>
+      {/* Right panel — always visible, empty state when nothing is selected */}
+      <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderLeft: "1px solid #2a2d34" }}>
+        {selectedItem && selectedDef ? (
+          <>
           <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{selectedDef.name}</h3>
           {selectedUids.length > 1 && (
             <div style={{ fontSize: 11, color: "#c4622d", marginBottom: 8 }}>
@@ -1518,8 +1656,17 @@ export default function BoothPlannerV2() {
             </div>
           )}
           <button onClick={deleteSelected} style={{ ...btnStyle, background: "#5a2424", width: "100%" }}>Delete object</button>
-        </div>
-      )}
+          </>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 8, opacity: 0.35 }}>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M3 3h18v18H3z" strokeDasharray="4 2"/>
+              <path d="M9 9h6v6H9z"/>
+            </svg>
+            <span style={{ fontSize: 11, color: "#999", textAlign: "center" }}>Select an object<br/>to edit properties</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
