@@ -317,6 +317,7 @@ export default function BoothPlannerV2() {
   const itemsRef = useRef(items);
   useEffect(() => { itemsRef.current = items; }, [items]);
   const [selectedUids, setSelectedUids] = useState([]); // array de uids
+  const [selectedWallUid, setSelectedWallUid] = useState(null);
   const selectedUid = selectedUids.length ? selectedUids[selectedUids.length - 1] : null;
   const [dragCatalog, setDragCatalog] = useState(null);
   const [cameras, setCameras] = useState([]);
@@ -577,15 +578,23 @@ export default function BoothPlannerV2() {
         const ws = wallStateRef.current;
         const pt = groundPoint(e.clientX, e.clientY);
         if (!ws.active) {
-          ws.active = true; ws.start = pt.clone(); ws.end = pt.clone();
+          // primer click: solo marca el inicio, espera que el mouse se mueva
+          ws.active = true;
+          ws.start = pt.clone();
+          ws.end = pt.clone();
         } else {
-          // commit wall
-          const cfg = wallConfigRef.current;
-          const uid = `wall_${Date.now()}`;
-          threeRef.current.commitWall({ uid, x1: ws.start.x, z1: ws.start.z, x2: ws.end.x, z2: ws.end.z, ...cfg });
-          ws.start = ws.end.clone(); // chain: end of this wall = start of next
-          ws.end = ws.start.clone();
-          threeRef.current.clearWallGhost();
+          // segundo click: confirma la pared solo si tiene longitud real
+          const dx = ws.end.x - ws.start.x, dz = ws.end.z - ws.start.z;
+          const len = Math.sqrt(dx * dx + dz * dz);
+          if (len > 0.05) {
+            const cfg = wallConfigRef.current;
+            const uid = `wall_${Date.now()}`;
+            threeRef.current.commitWall({ uid, x1: ws.start.x, z1: ws.start.z, x2: ws.end.x, z2: ws.end.z, ...cfg });
+            // encadenar: el final de esta pared es el inicio de la siguiente
+            ws.start = ws.end.clone();
+            ws.end = ws.start.clone();
+            threeRef.current.clearWallGhost();
+          }
         }
         return;
       }
@@ -628,10 +637,20 @@ export default function BoothPlannerV2() {
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, activeCam);
+      // check walls first
+      const wallHits = raycaster.intersectObjects(wallGroup.children, true);
+      if (wallHits.length) {
+        let obj = wallHits[0].object;
+        while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
+        threeRef.current.setSelectedWall(obj.userData.wallUid);
+        threeRef.current.setSelected(null);
+        return;
+      }
       const hits = raycaster.intersectObjects(itemGroup.children, true);
       if (hits.length) {
         let obj = hits[0].object;
         while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
+        threeRef.current.setSelectedWall(null); // deselect wall when clicking object
         draggingUid = obj.userData.uid;
         dragArmed = false;
         dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
@@ -770,6 +789,7 @@ export default function BoothPlannerV2() {
           setSelectedUids([uid]);
         }
       },
+      setSelectedWall: (uid) => setSelectedWallUid(uid),
       moveItem: (uid, x, z) => setItems((prev) => prev.map((it) => (it.uid === uid ? { ...it, x, z } : it))),
       setSelectedGroup: (uids) => setSelectedUids(uids),
       moveGroup: (offsets, px, pz) => setItems((prev) => prev.map((it) => (
@@ -838,12 +858,26 @@ export default function BoothPlannerV2() {
     wallGroup.children.filter((c) => !currentUids.has(c.userData.wallUid)).forEach((c) => wallGroup.remove(c));
     walls.forEach((wall) => {
       let mesh = wallGroup.children.find((c) => c.userData.wallUid === wall.uid);
-      if (mesh) wallGroup.remove(mesh); // siempre reconstruir (es procedural, es barato)
+      if (mesh) wallGroup.remove(mesh);
       mesh = buildWallMesh(wall);
       mesh.userData.wallUid = wall.uid;
+      // highlight selected wall
+      if (wall.uid === selectedWallUid) {
+        mesh.traverse((c) => {
+          if (c.isMesh) { c.material = c.material.clone(); c.material.emissive = new THREE.Color(0xff6a00); c.material.emissiveIntensity = 0.3; }
+        });
+        const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
+        const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
+        const outlineGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(len * 1.05, wall.height * 1.05, wall.thickness * 1.5));
+        const outlineLine = new THREE.LineSegments(outlineGeo, new THREE.LineBasicMaterial({ color: 0xff6a00, depthTest: false }));
+        outlineLine.position.y = wall.height / 2;
+        outlineLine.renderOrder = 999;
+        outlineLine.raycast = () => {};
+        mesh.add(outlineLine);
+      }
       wallGroup.add(mesh);
     });
-  }, [walls]);
+  }, [walls, selectedWallUid]);
 
   // ===================== Sync items -> meshes (GLB real con caché + placeholder mientras carga) =====================
   const loadedUidsRef = useRef(new Set()); // evita relanzar la carga si ya se está cargando ese uid
@@ -1132,13 +1166,18 @@ export default function BoothPlannerV2() {
       }
       if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
+        if (selectedWallUid) {
+          setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid));
+          setSelectedWallUid(null);
+          return;
+        }
         setItems((prev) => prev.filter((it) => !selectedUids.includes(it.uid)));
         setSelectedUids([]);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedUids, wallToolActive]);
+  }, [selectedUids, wallToolActive, selectedWallUid]);
 
   const itemCounts = React.useMemo(() => {
     const m = {};
@@ -1486,7 +1525,35 @@ export default function BoothPlannerV2() {
       {/* Right panel: selected item properties */}
       {/* Right panel — always visible, empty state when nothing is selected */}
       <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderLeft: "1px solid #2a2d34" }}>
-        {selectedItem && selectedDef ? (
+        {selectedWallUid && !selectedItem ? (() => {
+          const selWall = walls.find((w) => w.uid === selectedWallUid);
+          if (!selWall) return null;
+          return (
+            <>
+              <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Wall</h3>
+              <label style={labelStyle}>Height ({UNITS[unit].label})</label>
+              <input type="number" min="0.1" step="0.1" value={fmt(metersTo(selWall.height, unit))}
+                onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, height: toMeters(parseFloat(e.target.value) || 0, unit) } : w))}
+                style={{ ...inputStyle, marginBottom: 8 }} />
+              <label style={labelStyle}>Glass ratio</label>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <input type="range" min="0" max="1" step="0.05" value={selWall.glassRatio}
+                  onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, glassRatio: parseFloat(e.target.value) } : w))}
+                  style={{ flex: 1 }} />
+                <span style={{ fontSize: 11, color: "#999", width: 32 }}>{Math.round(selWall.glassRatio * 100)}%</span>
+              </div>
+              <label style={labelStyle}>Color</label>
+              <input type="color" value={selWall.color}
+                onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, color: e.target.value } : w))}
+                style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 12 }} />
+              <button
+                onClick={() => { setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid)); setSelectedWallUid(null); }}
+                style={{ ...btnStyle, background: "#5a2424", width: "100%" }}>
+                Delete wall
+              </button>
+            </>
+          );
+        })() : selectedItem && selectedDef ? (
           <>
           <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{selectedDef.name}</h3>
           {selectedUids.length > 1 && (
