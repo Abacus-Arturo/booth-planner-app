@@ -45,7 +45,7 @@ function isRepeatableSocket(socketName) {
 function buildWallMesh(wall) {
   const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
   const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
-  const angle = Math.atan2(dx, dz);
+  const angle = Math.atan2(dx, dz) - Math.PI / 2;
   const h = wall.height, gr = Math.min(Math.max(wall.glassRatio, 0), 1);
   const solidH = h * (1 - gr), glassH = h * gr;
   const t = wall.thickness;
@@ -673,6 +673,7 @@ export default function BoothPlannerV2() {
         });
       } else {
         threeRef.current.setSelected(null);
+        threeRef.current.setSelectedWall(null);
       }
     };
     const SNAP_STEP = Math.PI / 4; // 45°
