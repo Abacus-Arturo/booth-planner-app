@@ -41,6 +41,9 @@ const PROPS = [
 function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
 }
+// sockets en el manifest pueden ser string ("socket_shelf") u objeto ({name, accessoryFile})
+function getSocketName(s) { return typeof s === "string" ? s : s.name; }
+function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
 
 function buildWallMesh(wall) {
   const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
@@ -949,12 +952,19 @@ export default function BoothPlannerV2() {
   // ===================== Sync items -> meshes (GLB real con caché + placeholder mientras carga) =====================
   const loadedUidsRef = useRef(new Set()); // evita relanzar la carga si ya se está cargando ese uid
 
+  const PAINT_MATERIAL_NAME = "paint_color";
   const applyColorToContainer = (container, color) => {
     container.traverse((child) => {
-      if (child.isMesh && child.material) {
-        if (!child.userData.origColor) child.userData.origColor = child.material.color ? child.material.color.clone() : new THREE.Color(0xffffff);
-        if (child.material.color) child.material.color.set(color);
-      }
+      if (!child.isMesh || !child.material) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach((mat) => {
+        // Solo tiñe el material específicamente nombrado "paint_color"
+        // Si el modelo no tiene ningún material con ese nombre, tiñe todos (compatibilidad con modelos viejos sin convención)
+        const hasPaintMat = mats.some((m) => m.name === PAINT_MATERIAL_NAME);
+        if (hasPaintMat && mat.name !== PAINT_MATERIAL_NAME) return; // respeta los otros materiales
+        if (!mat.userData.origColor) mat.userData.origColor = mat.color ? mat.color.clone() : new THREE.Color(0xffffff);
+        if (mat.color) mat.color.set(color);
+      });
     });
   };
 
@@ -1114,7 +1124,8 @@ export default function BoothPlannerV2() {
           // sockets fake (markers) solo en modo placeholder, para poder previsualizar antes de tener el GLB
           if (it.kind === "model" && def.sockets && def.sockets.length && !placeholder.userData.socketsBuilt) {
             placeholder.userData.socketsBuilt = true;
-            def.sockets.forEach((sName, idx) => {
+            def.sockets.forEach((socketDef, idx) => {
+              const sName = getSocketName(socketDef);
               const marker = new THREE.Group();
               marker.name = sName;
               const baseY = isRepeatableSocket(sName) ? -def.h / 2 : 0;
@@ -1122,26 +1133,46 @@ export default function BoothPlannerV2() {
               placeholder.add(marker);
             });
           }
-          (def.sockets || []).forEach((sName) => {
+          (def.sockets || []).forEach((socketDef) => {
+            const sName = getSocketName(socketDef);
+            const accessoryFile = getSocketAccessoryFile(socketDef);
             const socketObj = placeholder.getObjectByName(sName);
             if (!socketObj) return;
             if (isRepeatableSocket(sName)) {
               const cfg = (it.sockets && it.sockets[sName]) || null;
               const wantCount = cfg && cfg.enabled ? Math.max(1, cfg.count || 1) : 0;
-              while (socketObj.children.length > wantCount) {
-                const c = socketObj.children.pop();
-                c.geometry.dispose(); c.material.dispose();
-              }
-              while (socketObj.children.length < wantCount) {
-                const plank = new THREE.Mesh(
-                  new THREE.BoxGeometry(def.w * 0.85, 0.03, def.d * 0.7 + 0.15),
-                  new THREE.MeshStandardMaterial({ color: 0xd8c9a3, roughness: 0.6 })
-                );
-                socketObj.add(plank);
+              const currentCount = socketObj.children.filter((c) => c.userData.isShelfClone).length;
+              // remove excess
+              const toRemove = socketObj.children.filter((c) => c.userData.isShelfClone).slice(wantCount);
+              toRemove.forEach((c) => socketObj.remove(c));
+              // add missing — usar el modelo real si hay accessoryFile, o un plank genérico como fallback
+              const needed = wantCount - Math.min(currentCount, wantCount);
+              if (needed > 0) {
+                if (accessoryFile) {
+                  getModelClone(accessoryFile).then((clone) => {
+                    for (let i = 0; i < needed; i++) {
+                      const c = clone.clone(true);
+                      c.userData.isShelfClone = true;
+                      socketObj.add(c);
+                    }
+                    const spacing = (cfg && cfg.spacing) || 0.3;
+                    const baseHeight = (cfg && cfg.baseHeight) || 0.3;
+                    socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
+                  }).catch(() => {});
+                } else {
+                  for (let i = 0; i < needed; i++) {
+                    const plank = new THREE.Mesh(
+                      new THREE.BoxGeometry(def.w * 0.85, 0.03, def.d * 0.7 + 0.15),
+                      new THREE.MeshStandardMaterial({ color: 0xd8c9a3, roughness: 0.6 })
+                    );
+                    plank.userData.isShelfClone = true;
+                    socketObj.add(plank);
+                  }
+                }
               }
               const spacing = (cfg && cfg.spacing) || 0.3;
               const baseHeight = (cfg && cfg.baseHeight) || 0.3;
-              socketObj.children.forEach((plank, i) => { plank.position.y = baseHeight + i * spacing; });
+              socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
             } else {
               const on = it.sockets && it.sockets[sName];
               let acc = socketObj.children[0];
@@ -1748,32 +1779,33 @@ export default function BoothPlannerV2() {
               <label style={labelStyle}>Accessories</label>
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
                 {selectedDef.sockets.map((s) => {
-                  const repeatable = isRepeatableSocket(s);
-                  const cfg = selectedItem.sockets && selectedItem.sockets[s];
+                  const sName = getSocketName(s);
+                  const repeatable = isRepeatableSocket(sName);
+                  const cfg = selectedItem.sockets && selectedItem.sockets[sName];
                   return (
-                    <div key={s}>
+                    <div key={sName}>
                       <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                        <input type="checkbox" checked={repeatable ? !!(cfg && cfg.enabled) : !!cfg} onChange={() => toggleSocket(s)} />
-                        {s.replace("socket_", "")}
+                        <input type="checkbox" checked={repeatable ? !!(cfg && cfg.enabled) : !!cfg} onChange={() => toggleSocket(sName)} />
+                        {sName.replace("socket_", "")}
                       </label>
                       {repeatable && cfg && cfg.enabled && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4, marginLeft: 20 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                             <span style={{ fontSize: 10, color: "#888", width: 60 }}>Count</span>
-                            <button onClick={() => updateSocketConfig(s, { count: Math.max(1, cfg.count - 1) })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>-</button>
+                            <button onClick={() => updateSocketConfig(sName, { count: Math.max(1, cfg.count - 1) })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>-</button>
                             <span style={{ fontSize: 12, width: 20, textAlign: "center" }}>{cfg.count}</span>
-                            <button onClick={() => updateSocketConfig(s, { count: cfg.count + 1 })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>+</button>
+                            <button onClick={() => updateSocketConfig(sName, { count: cfg.count + 1 })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>+</button>
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                             <span style={{ fontSize: 10, color: "#888", width: 60 }}>Spacing</span>
                             <input type="number" min="0.05" step="0.05" value={fmt(metersTo(cfg.spacing, unit))}
-                              onChange={(e) => updateSocketConfig(s, { spacing: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })}
+                              onChange={(e) => updateSocketConfig(sName, { spacing: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })}
                               style={{ ...inputStyle, padding: "2px 6px" }} />
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                             <span style={{ fontSize: 10, color: "#888", width: 60 }}>Base height</span>
                             <input type="number" min="0" step="0.05" value={fmt(metersTo(cfg.baseHeight, unit))}
-                              onChange={(e) => updateSocketConfig(s, { baseHeight: Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit)) })}
+                              onChange={(e) => updateSocketConfig(sName, { baseHeight: Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit)) })}
                               style={{ ...inputStyle, padding: "2px 6px" }} />
                           </div>
                         </div>
