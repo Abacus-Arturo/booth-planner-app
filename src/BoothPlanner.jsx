@@ -195,6 +195,8 @@ async function buildMaterial(json, bin, materialIndex) {
     transparent: baseColor[3] < 1,
     opacity: baseColor[3] != null ? baseColor[3] : 1,
   });
+  // preservar el nombre del material (necesario para paint_color y otros lookups por nombre)
+  if (m.name) mat.name = m.name;
   if (pbr.baseColorTexture) {
     const tex = await buildTextureFromImage(json, bin, pbr.baseColorTexture.index);
     if (tex) mat.map = tex;
@@ -1096,7 +1098,50 @@ export default function BoothPlannerV2() {
 
       if (realModel) {
         applyColorToContainer(realModel, it.color || def.color || "#888888");
-        applySocketVisibility(realModel, it.sockets);
+        // apply sockets: visibility for simple ones, shelf array for repeatable ones
+        (def.sockets || []).forEach((socketDef) => {
+          const sName = getSocketName(socketDef);
+          const accessoryFile = getSocketAccessoryFile(socketDef);
+          const socketObj = realModel.getObjectByName(sName);
+          if (!socketObj) return;
+          if (isRepeatableSocket(sName)) {
+            const cfg = (it.sockets && it.sockets[sName]) || null;
+            const wantCount = cfg && cfg.enabled ? Math.max(1, cfg.count || 1) : 0;
+            const existing = socketObj.children.filter((c) => c.userData.isShelfClone);
+            // remove excess
+            existing.slice(wantCount).forEach((c) => socketObj.remove(c));
+            const currentCount = Math.min(existing.length, wantCount);
+            const needed = wantCount - currentCount;
+            if (needed > 0) {
+              if (accessoryFile) {
+                getModelClone(accessoryFile).then((clone) => {
+                  for (let i = 0; i < needed; i++) {
+                    const c = clone.clone(true);
+                    c.userData.isShelfClone = true;
+                    socketObj.add(c);
+                  }
+                  const spacing = (cfg && cfg.spacing) || 0.3;
+                  const baseHeight = (cfg && cfg.baseHeight) || 0.3;
+                  socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
+                }).catch(() => {});
+              } else {
+                for (let i = 0; i < needed; i++) {
+                  const plank = new THREE.Mesh(
+                    new THREE.BoxGeometry(def.w * 0.85, 0.03, def.d * 0.7 + 0.15),
+                    new THREE.MeshStandardMaterial({ color: 0xd8c9a3, roughness: 0.6 })
+                  );
+                  plank.userData.isShelfClone = true;
+                  socketObj.add(plank);
+                }
+              }
+            }
+            const spacing = (cfg && cfg.spacing) || 0.3;
+            const baseHeight = (cfg && cfg.baseHeight) || 0.3;
+            socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
+          } else {
+            socketObj.visible = !!(it.sockets && it.sockets[sName]);
+          }
+        });
       } else {
         const placeholder = container.children.find((c) => c.userData.isPlaceholder);
         if (placeholder) {
