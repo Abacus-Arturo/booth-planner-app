@@ -978,14 +978,21 @@ export default function BoothPlannerV2() {
 
   const PAINT_MATERIAL_NAME = "paint_color";
   const applyColorToContainer = (container, color) => {
+    // primero recolectar TODOS los nombres de materiales del modelo completo
+    const allMatNames = new Set();
     container.traverse((child) => {
       if (!child.isMesh || !child.material) return;
       const mats = Array.isArray(child.material) ? child.material : [child.material];
-      // DEBUG temporal — ver qué nombres llegan realmente
-      console.log("[paint_color debug] mesh materials:", mats.map((m) => `"${m.name}"`).join(", "));
+      mats.forEach((m) => { if (m.name) allMatNames.add(m.name); });
+    });
+    const modelHasPaintMat = allMatNames.has(PAINT_MATERIAL_NAME);
+
+    container.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
       mats.forEach((mat) => {
-        const hasPaintMat = mats.some((m) => m.name === PAINT_MATERIAL_NAME);
-        if (hasPaintMat && mat.name !== PAINT_MATERIAL_NAME) return;
+        // si el modelo tiene paint_color, solo tiñe ese material específico
+        if (modelHasPaintMat && mat.name !== PAINT_MATERIAL_NAME) return;
         if (!mat.userData.origColor) mat.userData.origColor = mat.color ? mat.color.clone() : new THREE.Color(0xffffff);
         if (mat.color) mat.color.set(color);
       });
