@@ -378,6 +378,9 @@ export default function BoothPlannerV2() {
   const wallToolActiveRef = useRef(false);
   useEffect(() => { wallToolActiveRef.current = wallToolActive; }, [wallToolActive]);
   const [lineCount, setLineCount] = useState(5);
+  const [lineColor, setLineColor] = useState("#3a6ea5"); // color por default para el line tool
+  const lineColorRef = useRef(lineColor);
+  useEffect(() => { lineColorRef.current = lineColor; }, [lineColor]);
   const pendingLineDefRef = useRef(null);
   const lineCountRef = useRef(5);
   const lineStateRef = useRef({ active: false, start: null });
@@ -614,7 +617,7 @@ export default function BoothPlannerV2() {
         const t = n === 1 ? 0 : i / (n - 1);
         const pos = new THREE.Vector3().copy(start).lerp(end, t);
         const geo = kind !== "model" ? buildPlaceholderGeometry(def.kind, def.w, def.d, def.h) : new THREE.BoxGeometry(def.w, def.h, def.d);
-        const mat = new THREE.MeshStandardMaterial({ color: def.color || "#888888", roughness: 0.45, metalness: 0.15, transparent: true, opacity: 0.45 });
+        const mat = new THREE.MeshStandardMaterial({ color: lineColorRef.current || def.color || "#888888", roughness: 0.45, metalness: 0.15, transparent: true, opacity: 0.45 });
         const ghost = new THREE.Mesh(geo, mat);
         ghost.position.set(pos.x, def.h / 2, pos.z);
         ghost.rotation.y = baseAngle;
@@ -683,7 +686,7 @@ export default function BoothPlannerV2() {
           const dir = new THREE.Vector3().subVectors(ls.end, ls.start);
           const angle = Math.atan2(dir.x, dir.z) + lineAngleOffsetRef.current;
           const groupId = `line_${Date.now()}`;
-          const baseColor = def.color || "#888888";
+          const baseColor = lineColorRef.current || def.color || "#888888";
           const newItems = [];
           for (let i = 0; i < n; i++) {
             const t = n === 1 ? 0 : i / (n - 1);
@@ -1537,7 +1540,7 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[cat.id] && (
                   <span style={countBadgeStyle}>{itemCounts[cat.id]}</span>
                 )}
-                <button disabled={!libraryReady} onClick={() => setPendingLineDef({ def: cat, kind: "model" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                <button disabled={!libraryReady} onClick={() => { setPendingLineDef({ def: cat, kind: "model" }); setLineColor(cat.color || "#888888"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
@@ -1554,7 +1557,7 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[p.id] && (
                   <span style={countBadgeStyle}>{itemCounts[p.id]}</span>
                 )}
-                <button onClick={() => setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                <button onClick={() => { setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); setLineColor("#9aa0a6"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
@@ -1585,6 +1588,10 @@ export default function BoothPlannerV2() {
             <div style={{ color: "#cde8d9", fontSize: 11, marginBottom: 8 }}>
               Click on the floor = start · move the mouse · scroll = change count ({lineCount}) · ← → = orientation · click again = confirm
             </div>
+            <label style={{ ...labelStyle, color: "#cde8d9" }}>Color</label>
+            <input type="color" value={lineColor}
+              onChange={(e) => setLineColor(e.target.value)}
+              style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 8 }} />
             <button onClick={() => setPendingLineDef(null)} style={{ ...btnStyle, background: "#1b1d22" }}>Cancel</button>
           </div>
         )}
