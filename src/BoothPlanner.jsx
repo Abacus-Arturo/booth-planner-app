@@ -378,9 +378,9 @@ export default function BoothPlannerV2() {
   const wallToolActiveRef = useRef(false);
   useEffect(() => { wallToolActiveRef.current = wallToolActive; }, [wallToolActive]);
   const [lineCount, setLineCount] = useState(5);
-  const [lineColor, setLineColor] = useState("#3a6ea5"); // color por default para el line tool
-  const lineColorRef = useRef(lineColor);
-  useEffect(() => { lineColorRef.current = lineColor; }, [lineColor]);
+  const [activeColor, setActiveColor] = useState("#3a6ea5"); // color activo global — aplica a todos los objetos nuevos
+  const lineColorRef = useRef(activeColor);
+  useEffect(() => { lineColorRef.current = activeColor; }, [activeColor]);
   const pendingLineDefRef = useRef(null);
   const lineCountRef = useRef(5);
   const lineStateRef = useRef({ active: false, start: null });
@@ -1280,7 +1280,7 @@ export default function BoothPlannerV2() {
     setItems((prev) => [...prev, {
       uid: `${def.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       catalogId: def.id, kind, x: pt.x, z: pt.z, rotY: 0,
-      color: def.color || "#888888", sockets: {},
+      color: (kind === "model" || kind === "prop") ? (lineColorRef.current || def.color || "#888888") : (def.color || "#888888"), sockets: {},
       yOffset: 0, parentUid: null, localOffset: null,
     }]);
   }, []);
@@ -1528,8 +1528,13 @@ export default function BoothPlannerV2() {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {catalog.map((cat) => (
               <div key={cat.id} style={{ ...catalogCard, opacity: libraryReady ? 1 : 0.4, pointerEvents: libraryReady ? "auto" : "none" }}>
-                <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: cat, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
-                  <div style={{ width: 14, height: 14, borderRadius: 3, background: cat.color, flexShrink: 0 }} />
+                <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: { ...cat, color: activeColor }, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
+                  <input type="color" value={activeColor}
+                    onChange={(e) => setActiveColor(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    title="Click to change active color"
+                    style={{ width: 18, height: 18, borderRadius: 3, border: "1px solid rgba(255,255,255,0.2)", padding: 0, cursor: "pointer", flexShrink: 0, background: "none" }}
+                  />
                   <div style={{ fontSize: 12 }}>
                     <div>{cat.name}</div>
                     <div style={{ color: "#777", fontSize: 11 }}>
@@ -1540,7 +1545,7 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[cat.id] && (
                   <span style={countBadgeStyle}>{itemCounts[cat.id]}</span>
                 )}
-                <button disabled={!libraryReady} onClick={() => { setPendingLineDef({ def: cat, kind: "model" }); setLineColor(cat.color || "#888888"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                <button disabled={!libraryReady} onClick={() => { setPendingLineDef({ def: cat, kind: "model" }); setActiveColor(cat.color || "#888888"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
@@ -1557,7 +1562,7 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[p.id] && (
                   <span style={countBadgeStyle}>{itemCounts[p.id]}</span>
                 )}
-                <button onClick={() => { setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); setLineColor("#9aa0a6"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                <button onClick={() => { setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); setActiveColor("#9aa0a6"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
@@ -1588,10 +1593,6 @@ export default function BoothPlannerV2() {
             <div style={{ color: "#cde8d9", fontSize: 11, marginBottom: 8 }}>
               Click on the floor = start · move the mouse · scroll = change count ({lineCount}) · ← → = orientation · click again = confirm
             </div>
-            <label style={{ ...labelStyle, color: "#cde8d9" }}>Color</label>
-            <input type="color" value={lineColor}
-              onChange={(e) => setLineColor(e.target.value)}
-              style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 8 }} />
             <button onClick={() => setPendingLineDef(null)} style={{ ...btnStyle, background: "#1b1d22" }}>Cancel</button>
           </div>
         )}
