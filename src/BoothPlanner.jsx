@@ -335,7 +335,10 @@ function varyColor(hexColor, index) {
   const hsl = { h: 0, s: 0, l: 0 };
   c.getHSL(hsl);
   const newHue = (hsl.h + HUE_SHIFT_DEG / 360) % 1;
-  c.setHSL(newHue, hsl.s, hsl.l);
+  // si la saturación es muy baja el hue shift no se ve — mínimo 0.5 para que sea visible
+  const minSat = 0.5;
+  const newSat = Math.max(hsl.s, minSat);
+  c.setHSL(newHue, newSat, hsl.l);
   return `#${c.getHexString()}`;
 }
 
