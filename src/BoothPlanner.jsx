@@ -378,9 +378,11 @@ export default function BoothPlannerV2() {
   const wallToolActiveRef = useRef(false);
   useEffect(() => { wallToolActiveRef.current = wallToolActive; }, [wallToolActive]);
   const [lineCount, setLineCount] = useState(5);
-  const [activeColor, setActiveColor] = useState("#3a6ea5"); // color activo global — aplica a todos los objetos nuevos
-  const lineColorRef = useRef(activeColor);
-  useEffect(() => { lineColorRef.current = activeColor; }, [activeColor]);
+  const [catalogColors, setCatalogColors] = useState({}); // { [catalogId]: color }
+  const catalogColorsRef = useRef({});
+  useEffect(() => { catalogColorsRef.current = catalogColors; }, [catalogColors]);
+  const getCatalogColor = (def) => catalogColors[def.id] || def.color || "#888888";
+  const setCatalogColor = (id, color) => setCatalogColors((prev) => ({ ...prev, [id]: color }));
   const pendingLineDefRef = useRef(null);
   const lineCountRef = useRef(5);
   const lineStateRef = useRef({ active: false, start: null });
@@ -617,7 +619,7 @@ export default function BoothPlannerV2() {
         const t = n === 1 ? 0 : i / (n - 1);
         const pos = new THREE.Vector3().copy(start).lerp(end, t);
         const geo = kind !== "model" ? buildPlaceholderGeometry(def.kind, def.w, def.d, def.h) : new THREE.BoxGeometry(def.w, def.h, def.d);
-        const mat = new THREE.MeshStandardMaterial({ color: lineColorRef.current || def.color || "#888888", roughness: 0.45, metalness: 0.15, transparent: true, opacity: 0.45 });
+        const mat = new THREE.MeshStandardMaterial({ color: catalogColorsRef.current[def.id] || def.color || "#888888", roughness: 0.45, metalness: 0.15, transparent: true, opacity: 0.45 });
         const ghost = new THREE.Mesh(geo, mat);
         ghost.position.set(pos.x, def.h / 2, pos.z);
         ghost.rotation.y = baseAngle;
@@ -686,7 +688,7 @@ export default function BoothPlannerV2() {
           const dir = new THREE.Vector3().subVectors(ls.end, ls.start);
           const angle = Math.atan2(dir.x, dir.z) + lineAngleOffsetRef.current;
           const groupId = `line_${Date.now()}`;
-          const baseColor = lineColorRef.current || def.color || "#888888";
+          const baseColor = catalogColorsRef.current[def.id] || def.color || "#888888";
           const newItems = [];
           for (let i = 0; i < n; i++) {
             const t = n === 1 ? 0 : i / (n - 1);
@@ -1280,7 +1282,7 @@ export default function BoothPlannerV2() {
     setItems((prev) => [...prev, {
       uid: `${def.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       catalogId: def.id, kind, x: pt.x, z: pt.z, rotY: 0,
-      color: (kind === "model" || kind === "prop") ? (lineColorRef.current || def.color || "#888888") : (def.color || "#888888"), sockets: {},
+      color: (kind === "model" || kind === "prop") ? (catalogColorsRef.current[def.id] || def.color || "#888888") : (def.color || "#888888"), sockets: {},
       yOffset: 0, parentUid: null, localOffset: null,
     }]);
   }, []);
@@ -1528,12 +1530,12 @@ export default function BoothPlannerV2() {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {catalog.map((cat) => (
               <div key={cat.id} style={{ ...catalogCard, opacity: libraryReady ? 1 : 0.4, pointerEvents: libraryReady ? "auto" : "none" }}>
-                <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: { ...cat, color: activeColor }, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
-                  <input type="color" value={activeColor}
-                    onChange={(e) => setActiveColor(e.target.value)}
+                <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: cat, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
+                  <input type="color" value={getCatalogColor(cat)}
+                    onChange={(e) => { e.stopPropagation(); setCatalogColor(cat.id, e.target.value); }}
                     onClick={(e) => e.stopPropagation()}
-                    title="Click to change active color"
-                    style={{ width: 18, height: 18, borderRadius: 3, border: "1px solid rgba(255,255,255,0.2)", padding: 0, cursor: "pointer", flexShrink: 0, background: "none" }}
+                    title="Click to change color for this model"
+                    style={{ width: 28, height: 28, borderRadius: 4, border: "1px solid rgba(255,255,255,0.2)", padding: 2, cursor: "pointer", flexShrink: 0, background: "none" }}
                   />
                   <div style={{ fontSize: 12 }}>
                     <div>{cat.name}</div>
@@ -1545,7 +1547,7 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[cat.id] && (
                   <span style={countBadgeStyle}>{itemCounts[cat.id]}</span>
                 )}
-                <button disabled={!libraryReady} onClick={() => { setPendingLineDef({ def: cat, kind: "model" }); setActiveColor(cat.color || "#888888"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                <button disabled={!libraryReady} onClick={() => { setPendingLineDef({ def: cat, kind: "model" }); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
@@ -1562,7 +1564,7 @@ export default function BoothPlannerV2() {
                 {!!itemCounts[p.id] && (
                   <span style={countBadgeStyle}>{itemCounts[p.id]}</span>
                 )}
-                <button onClick={() => { setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); setActiveColor("#9aa0a6"); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                <button onClick={() => { setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
               </div>
             ))}
           </div>
