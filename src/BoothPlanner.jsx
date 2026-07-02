@@ -288,8 +288,27 @@ function loadModelOnce(url) {
 }
 
 function getModelClone(url) {
-  // Espera la carga (una sola vez por modelo) y devuelve un clon barato (geometría/material compartidos).
-  return loadModelOnce(url).then((scene) => scene.clone(true));
+  return loadModelOnce(url).then((scene) => {
+    const clone = scene.clone(true);
+    // clone(true) clona la geometría pero los materiales se comparten por referencia
+    // en Three.js r128+. Necesitamos que cada clon tenga su propio material
+    // para poder tintar paint_color de forma independiente por instancia.
+    clone.traverse((child) => {
+      if (!child.isMesh) return;
+      if (Array.isArray(child.material)) {
+        child.material = child.material.map((m) => {
+          const c = m.clone();
+          c.name = m.name; // preservar nombre (se pierde en .clone() en algunas versiones)
+          return c;
+        });
+      } else if (child.material) {
+        const c = child.material.clone();
+        c.name = child.material.name;
+        child.material = c;
+      }
+    });
+    return clone;
+  });
 }
 
 function measureModelDims(url) {
@@ -327,7 +346,10 @@ export default function BoothPlannerV2() {
   const findDef = useCallback((kindCategory, catalogId) => {
     if (kindCategory === "model") return catalog.find((c) => c.id === catalogId);
     if (kindCategory === "primitive") return PRIMITIVES.find((p) => p.id === catalogId);
-    if (kindCategory === "prop") return PROPS.find((p) => p.id === catalogId);
+    if (kindCategory === "prop") {
+      return PROPS.find((p) => p.id === catalogId) ||
+             catalog.find((c) => c.id === catalogId && c.category === "Props");
+    }
     return null;
   }, [catalog]);
   const [items, setItems] = useState([]); // {uid, catalogId, kind, x,z,rotY,color,sockets,groupId}
@@ -1533,10 +1555,10 @@ export default function BoothPlannerV2() {
 
         <Section title={`Props in scene: ${items.filter((it) => it.kind === "prop").length}`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {PROPS.map((p) => (
+            {[...PROPS, ...catalog.filter((c) => c.category === "Props")].map((p) => (
               <div key={p.id} style={catalogCard}>
                 <div draggable onDragStart={() => setDragCatalog({ def: p, kind: "prop" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "grab" }}>
-                  <div style={{ width: 14, height: 14, borderRadius: 3, background: p.color, flexShrink: 0 }} />
+                  <div style={{ width: 14, height: 14, borderRadius: 3, background: p.color || "#9aa0a6", flexShrink: 0 }} />
                   <div style={{ fontSize: 12 }}>{p.name}</div>
                 </div>
                 {!!itemCounts[p.id] && (
