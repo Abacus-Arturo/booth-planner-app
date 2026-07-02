@@ -325,17 +325,16 @@ function measureModelDims(url) {
 }
 
 // ---- Line tool color variation ----
-// HUE_SHIFT_DEG: grados que se rota el tono entre cada pieza consecutiva.
-// Prueba valores entre 10 y 60 para encontrar el balance que más te guste.
-// Ejemplos: 15 = sutil, 30 = notable, 45 = muy diferenciado, 60 = agresivo
-const HUE_SHIFT_DEG = 40;
+// HUE_SHIFT_DEG: grados de rotación de tono para las piezas alternas.
+// Prueba valores entre 10 y 60. Ejemplos: 15 = sutil, 30 = notable, 45 = muy diferenciado
+const HUE_SHIFT_DEG = 30;
 
 function varyColor(hexColor, index) {
-  if (index === 0) return hexColor; // la primera pieza siempre es el color original
+  if (index % 2 === 0) return hexColor; // piezas pares = color original
   const c = new THREE.Color(hexColor);
   const hsl = { h: 0, s: 0, l: 0 };
   c.getHSL(hsl);
-  const newHue = (hsl.h + (HUE_SHIFT_DEG / 360) * index) % 1;
+  const newHue = (hsl.h + HUE_SHIFT_DEG / 360) % 1;
   c.setHSL(newHue, hsl.s, hsl.l);
   return `#${c.getHexString()}`;
 }
