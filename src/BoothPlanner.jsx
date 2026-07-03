@@ -349,7 +349,9 @@ export default function BoothPlannerV2() {
   const [floorW, setFloorW] = useState(10);
   const [floorD, setFloorD] = useState(8);
   const [showFileMenu, setShowFileMenu] = useState(false);
-  const [saveStatus, setSaveStatus] = useState(null); // "saved" | null
+  const [saveStatus, setSaveStatus] = useState(null);
+  const [projectName, setProjectName] = useState("Untitled Layout");
+  const [showSaveModal, setShowSaveModal] = useState(false); // "saved" | null
   const historyRef = useRef([]);
   const historyIndexRef = useRef(-1);
   const skipHistoryRef = useRef(false);
@@ -1583,6 +1585,27 @@ export default function BoothPlannerV2() {
         return;
       }
 
+      if ((e.key === "s" || e.key === "S") && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        saveProject();
+        return;
+      }
+
+      if ((e.key === "y" || e.key === "Y") && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (historyIndexRef.current < historyRef.current.length - 1) {
+          historyIndexRef.current++;
+          const snapshot = historyRef.current[historyIndexRef.current];
+          skipHistoryRef.current = true;
+          setItems(snapshot.items);
+          setWalls(snapshot.walls);
+          setSelectedUids([]);
+          setSelectedWallUid(null);
+          setTimeout(() => { skipHistoryRef.current = false; }, 50);
+        }
+        return;
+      }
+
       if (e.key === "Escape") {
         if (wallToolActive) {
           wallStateRef.current = { active: false, start: null, end: null };
@@ -1828,6 +1851,7 @@ export default function BoothPlannerV2() {
   // ===================== File menu =====================
   const buildProjectData = () => ({
     version: 1,
+    name: projectName,
     savedAt: new Date().toISOString(),
     manifestUrl,
     unit,
@@ -1838,6 +1862,7 @@ export default function BoothPlannerV2() {
   });
 
   const restoreProjectData = (data) => {
+    if (data.name) setProjectName(data.name);
     if (data.manifestUrl) setManifestUrl(data.manifestUrl);
     if (data.unit) setUnit(data.unit);
     if (data.floorW) setFloorW(data.floorW);
@@ -1852,18 +1877,31 @@ export default function BoothPlannerV2() {
     setSelectedWallUid(null);
   };
 
-  const saveProject = () => {
-    const data = buildProjectData();
+  const doSave = (name) => {
+    const data = { ...buildProjectData(), name };
+    setProjectName(name);
     const json = JSON.stringify(data, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `booth-layout-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `${name.replace(/[^a-z0-9_-]/gi, "_")}.json`;
     a.click();
     URL.revokeObjectURL(url);
     setSaveStatus("saved");
     setTimeout(() => setSaveStatus(null), 2000);
+    setShowSaveModal(false);
+    setShowFileMenu(false);
+  };
+
+  const saveProject = () => {
+    // Save: usa el nombre actual sin preguntar
+    doSave(projectName);
+  };
+
+  const saveProjectAs = () => {
+    // Save As: abre el modal para cambiar el nombre
+    setShowSaveModal(true);
     setShowFileMenu(false);
   };
 
@@ -1946,6 +1984,28 @@ export default function BoothPlannerV2() {
 
   return (
     <>
+    {showSaveModal && (
+      <div style={{ position: "fixed", inset: 0, zIndex: 2000, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ background: "#1b1d22", borderRadius: 12, padding: 24, width: 360, border: "1px solid #33363d" }}>
+          <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>Save Project As</h3>
+          <input
+            type="text"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") doSave(projectName); if (e.key === "Escape") setShowSaveModal(false); }}
+            autoFocus
+            style={{ ...inputStyle, width: "100%", fontSize: 14, marginBottom: 16 }}
+            placeholder="Project name"
+          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setShowSaveModal(false)} style={{ ...btnStyle, flex: 1 }}>Cancel</button>
+            <button onClick={() => doSave(projectName)} style={{ ...btnStyle, flex: 1, background: "#2d6a4f" }}>
+              💾 Save
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
     {floorPlanModal && (
       <FloorPlanModal
         modal={floorPlanModal}
@@ -1966,14 +2026,17 @@ export default function BoothPlannerV2() {
               File ▾
             </button>
             {showFileMenu && (
-              <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, background: "#22242a", border: "1px solid #33363d", borderRadius: 8, overflow: "hidden", zIndex: 100, minWidth: 160 }}
+              <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, background: "#22242a", border: "1px solid #33363d", borderRadius: 8, overflow: "hidden", zIndex: 100, minWidth: 180 }}
                 onMouseLeave={() => setShowFileMenu(false)}>
                 <button onClick={newProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
                   🆕 New Project
                 </button>
                 <div style={{ height: 1, background: "#33363d" }} />
                 <button onClick={saveProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
-                  💾 Save Project
+                  💾 Save <span style={{ color: "#666", fontSize: 11 }}>Ctrl+S</span>
+                </button>
+                <button onClick={saveProjectAs} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
+                  💾 Save As…
                 </button>
                 <button onClick={loadProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
                   📂 Load Project
@@ -1981,6 +2044,9 @@ export default function BoothPlannerV2() {
               </div>
             )}
           </div>
+        </div>
+        <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={projectName}>
+          {projectName}
         </div>
         {saveStatus === "saved" && (
           <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 4 }}>✓ Project saved</div>
@@ -2238,7 +2304,7 @@ export default function BoothPlannerV2() {
               <div>← →: rotate 15° (Shift = 1°)</div>
               <div>Delete / Backspace: delete</div>
               <div>Ctrl/Cmd + D: duplicate</div>
-              <div>Ctrl/Cmd + Z: undo</div>
+              <div>Ctrl/Cmd + Z: undo · Ctrl/Cmd + Y: redo</div>
               <div>Shift+click: add/remove from selection</div>
               <div>Right-click + drag: orbit camera</div>
             </>
