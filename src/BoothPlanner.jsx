@@ -348,6 +348,22 @@ export default function BoothPlannerV2() {
   const [unit, setUnit] = useState("m");
   const [floorW, setFloorW] = useState(10);
   const [floorD, setFloorD] = useState(8);
+  const [showFileMenu, setShowFileMenu] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(null); // "saved" | null
+  const historyRef = useRef([]);
+  const historyIndexRef = useRef(-1);
+  const skipHistoryRef = useRef(false);
+  const MAX_HISTORY = 50;
+
+  const pushHistory = useCallback((newItems, newWalls) => {
+    if (skipHistoryRef.current) return;
+    historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
+    historyRef.current.push({ items: newItems, walls: newWalls });
+    if (historyRef.current.length > MAX_HISTORY) historyRef.current.shift();
+    historyIndexRef.current = historyRef.current.length - 1;
+  }, []);
+
+  const AUTOSAVE_KEY = "boothplanner_autosave";
   const floorWRef = useRef(10);
   const floorDRef = useRef(8);
   useEffect(() => { floorWRef.current = floorW; }, [floorW]);
@@ -377,8 +393,15 @@ export default function BoothPlannerV2() {
   useEffect(() => { wallsRef.current = walls; }, [walls]);
   const itemsRef = useRef(items);
   useEffect(() => { itemsRef.current = items; }, [items]);
+
+  // Guardar snapshot en historial cuando cambian items o walls (con debounce)
+  useEffect(() => {
+    const t = setTimeout(() => pushHistory(items, walls), 300);
+    return () => clearTimeout(t);
+  }, [items, walls, pushHistory]);
   const [selectedUids, setSelectedUids] = useState([]); // array de uids
   const [selectedWallUid, setSelectedWallUid] = useState(null);
+  const draggingWallHandleRef = useRef(null); // { wallUid, endpoint: 'start'|'end' }
   const selectedUid = selectedUids.length ? selectedUids[selectedUids.length - 1] : null;
   const [dragCatalog, setDragCatalog] = useState(null);
   const [cameras, setCameras] = useState([]);
@@ -601,6 +624,8 @@ export default function BoothPlannerV2() {
     scene.add(itemGroup);
     const wallGroup = new THREE.Group();
     scene.add(wallGroup);
+    const handleGroup = new THREE.Group();
+    scene.add(handleGroup);
     const ghostGroup = new THREE.Group();
     scene.add(ghostGroup);
 
@@ -730,6 +755,18 @@ export default function BoothPlannerV2() {
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, activeCam);
+      // ---- Wall handle drag ----
+      const { handleGroup } = threeRef.current;
+      if (handleGroup && handleGroup.children.length) {
+        const handleHits = raycaster.intersectObjects(handleGroup.children, false);
+        if (handleHits.length) {
+          const h = handleHits[0].object;
+          draggingWallHandleRef.current = { wallUid: h.userData.wallUid, endpoint: h.userData.endpoint };
+          dragArmed = false;
+          dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
+          return;
+        }
+      }
       // check walls first
       const wallHits = raycaster.intersectObjects(wallGroup.children, true);
       if (wallHits.length) {
@@ -842,6 +879,25 @@ export default function BoothPlannerV2() {
       return new THREE.Vector3(start.x + Math.sin(snapped) * len, 0, start.z + Math.cos(snapped) * len);
     };
     const onMoveDrag = (e) => {
+      // ---- Wall handle drag ----
+      if (draggingWallHandleRef.current) {
+        if (!dragArmed) {
+          const dx = e.clientX - dragStartScreenX, dy = e.clientY - dragStartScreenY;
+          if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+          dragArmed = true;
+        }
+        const raw = groundPoint(e.clientX, e.clientY);
+        const { pt, snapped } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
+        const w = wallsRef.current.find((w) => w.uid === draggingWallHandleRef.current.wallUid);
+        const fixedPt = w ? (draggingWallHandleRef.current.endpoint === 'start'
+          ? new THREE.Vector3(w.x2, 0, w.z2)
+          : new THREE.Vector3(w.x1, 0, w.z1)) : pt;
+        const finalPt = e.altKey ? pt : snapLineEnd(fixedPt, pt, false);
+        snapIndicator.position.set(finalPt.x, 0.01, finalPt.z);
+        snapIndicator.visible = snapped;
+        threeRef.current.moveWallEndpoint(draggingWallHandleRef.current.wallUid, draggingWallHandleRef.current.endpoint, finalPt.x, finalPt.z);
+        return;
+      }
       if (wallToolActiveRef.current) {
         const raw = groundPoint(e.clientX, e.clientY);
         const ws = wallStateRef.current;
@@ -914,7 +970,14 @@ export default function BoothPlannerV2() {
       const pt = groundPoint(e.clientX, e.clientY);
       threeRef.current.moveGroup(dragOffsetsRef.current, pt.x, pt.z);
     };
-    const onUpDrag = () => { draggingUid = null; draggingWallUid = null; };
+    const onUpDrag = () => {
+      draggingUid = null;
+      draggingWallUid = null;
+      if (draggingWallHandleRef.current) {
+        draggingWallHandleRef.current = null;
+        snapIndicator.visible = false;
+      }
+    };
     dom.addEventListener("pointerdown", onDownSelect);
     const onDblClick = (e) => {
       if (pendingLineDefRef.current) return; // no aplica en modo línea
@@ -949,7 +1012,7 @@ export default function BoothPlannerV2() {
     animate();
 
     threeRef.current = {
-      scene, camera, renderer, itemGroup, wallGroup, floor, dom,
+      scene, camera, renderer, itemGroup, wallGroup, handleGroup, floor, dom,
       target, getRadiusThetaPhi: () => ({ radius, theta, phi }),
       setRadiusThetaPhi: (r, t, p) => { radius = r; theta = t; phi = p; updateCamera(); },
       getActiveCamera: () => activeCam,
@@ -1016,6 +1079,10 @@ export default function BoothPlannerV2() {
         return [...updated, wall];
       }),
       moveWall: (uid, x1, z1, x2, z2) => setWalls((prev) => prev.map((w) => w.uid === uid ? { ...w, x1, z1, x2, z2 } : w)),
+      moveWallEndpoint: (uid, endpoint, x, z) => setWalls((prev) => prev.map((w) => {
+        if (w.uid !== uid) return w;
+        return endpoint === 'start' ? { ...w, x1: x, z1: z } : { ...w, x2: x, z2: z };
+      })),
       clearWallGhost: () => {
         const wg = threeRef.current.wallGhost;
         if (wg) { threeRef.current.scene.remove(wg); threeRef.current.wallGhost = null; }
@@ -1085,6 +1152,31 @@ export default function BoothPlannerV2() {
     scene.add(mesh);
     return () => { scene.remove(mesh); mat.dispose(); geo.dispose(); };
   }, [floorPlan]);
+
+  // ===================== Sync wall handles =====================
+  useEffect(() => {
+    const { handleGroup } = threeRef.current;
+    if (!handleGroup) return;
+    // limpiar handles anteriores
+    while (handleGroup.children.length) handleGroup.children.pop();
+    if (!selectedWallUid) return;
+    const wall = walls.find((w) => w.uid === selectedWallUid);
+    if (!wall) return;
+    const makeHandle = (x, z, endpoint) => {
+      const geo = new THREE.SphereGeometry(0.12, 16, 16);
+      const mat = new THREE.MeshBasicMaterial({ color: 0xff6a00, depthTest: false });
+      const sphere = new THREE.Mesh(geo, mat);
+      sphere.position.set(x, 0.15, z);
+      sphere.renderOrder = 999;
+      sphere.userData.isWallHandle = true;
+      sphere.userData.wallUid = selectedWallUid;
+      sphere.userData.endpoint = endpoint;
+      sphere.raycast = THREE.Mesh.prototype.raycast; // asegurar que sea clickeable
+      return sphere;
+    };
+    handleGroup.add(makeHandle(wall.x1, wall.z1, 'start'));
+    handleGroup.add(makeHandle(wall.x2, wall.z2, 'end'));
+  }, [selectedWallUid, walls]);
 
   // ===================== Sync walls -> meshes =====================
   useEffect(() => {
@@ -1476,6 +1568,21 @@ export default function BoothPlannerV2() {
       // UNLESS the user is actively typing in an input (has text selected or cursor inside)
       const inInput = e.target && e.target.tagName === "INPUT" && e.target.type !== "color" && e.target.type !== "range";
 
+      if ((e.key === "z" || e.key === "Z") && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (historyIndexRef.current > 0) {
+          historyIndexRef.current--;
+          const snapshot = historyRef.current[historyIndexRef.current];
+          skipHistoryRef.current = true;
+          setItems(snapshot.items);
+          setWalls(snapshot.walls);
+          setSelectedUids([]);
+          setSelectedWallUid(null);
+          setTimeout(() => { skipHistoryRef.current = false; }, 50);
+        }
+        return;
+      }
+
       if (e.key === "Escape") {
         if (wallToolActive) {
           wallStateRef.current = { active: false, start: null, end: null };
@@ -1718,6 +1825,107 @@ export default function BoothPlannerV2() {
     setFloorPlanModal(null);
   };
 
+  // ===================== File menu =====================
+  const buildProjectData = () => ({
+    version: 1,
+    savedAt: new Date().toISOString(),
+    manifestUrl,
+    unit,
+    floorW, floorD, floorColor,
+    floorPlan: floorPlan || null,
+    items, walls, cameras,
+    catalogColors,
+  });
+
+  const restoreProjectData = (data) => {
+    if (data.manifestUrl) setManifestUrl(data.manifestUrl);
+    if (data.unit) setUnit(data.unit);
+    if (data.floorW) setFloorW(data.floorW);
+    if (data.floorD) setFloorD(data.floorD);
+    if (data.floorColor) setFloorColor(data.floorColor);
+    setFloorPlan(data.floorPlan || null);
+    setItems(data.items || []);
+    setWalls(data.walls || []);
+    setCameras(data.cameras || []);
+    if (data.catalogColors) setCatalogColors(data.catalogColors);
+    setSelectedUids([]);
+    setSelectedWallUid(null);
+  };
+
+  const saveProject = () => {
+    const data = buildProjectData();
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `booth-layout-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setSaveStatus("saved");
+    setTimeout(() => setSaveStatus(null), 2000);
+    setShowFileMenu(false);
+  };
+
+  const loadProject = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target.result);
+          restoreProjectData(data);
+        } catch (err) {
+          alert("Could not read the project file. Make sure it's a valid Booth Planner JSON.");
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+    setShowFileMenu(false);
+  };
+
+  const newProject = () => {
+    if (items.length > 0 || walls.length > 0) {
+      if (!window.confirm("Start a new project? All unsaved changes will be lost.")) return;
+    }
+    setItems([]); setWalls([]); setCameras([]);
+    setFloorW(10); setFloorD(8); setFloorColor("#e9e9e9");
+    setFloorPlan(null);
+    setSelectedUids([]); setSelectedWallUid(null);
+    setShowFileMenu(false);
+  };
+
+  // Autoguardado en localStorage cada vez que cambia el estado principal
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      try {
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(buildProjectData()));
+      } catch (e) { /* localStorage lleno o bloqueado */ }
+    }, 1500); // espera 1.5s de inactividad antes de guardar
+    return () => clearTimeout(timeout);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, walls, cameras, floorW, floorD, floorColor, floorPlan, unit]);
+
+  // Recuperar autoguardado al montar (solo si no hay items ya)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(AUTOSAVE_KEY);
+      if (saved) {
+        const data = JSON.parse(saved);
+        if ((data.items?.length > 0 || data.walls?.length > 0) &&
+            window.confirm("A previous session was found. Restore it?")) {
+          restoreProjectData(data);
+        }
+      }
+    } catch (e) { /* ignore */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const captureRender = () => {
     const { scene, renderer, getActiveCamera } = threeRef.current;
     const cam = getActiveCamera();
@@ -1750,7 +1958,33 @@ export default function BoothPlannerV2() {
     <div style={{ display: "flex", height: "100vh", width: "100%", background: "#13151a", color: "#eee", fontFamily: "Inter, system-ui, sans-serif" }}>
       {/* Sidebar */}
       <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderRight: "1px solid #2a2d34" }}>
-        <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 2 }}>Booth Planner</h2>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 2 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Booth Planner</h2>
+          <div style={{ position: "relative" }}>
+            <button onClick={() => setShowFileMenu((v) => !v)}
+              style={{ ...btnStyle, padding: "4px 10px", fontSize: 12, background: showFileMenu ? "#c4622d" : "#33363d" }}>
+              File ▾
+            </button>
+            {showFileMenu && (
+              <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, background: "#22242a", border: "1px solid #33363d", borderRadius: 8, overflow: "hidden", zIndex: 100, minWidth: 160 }}
+                onMouseLeave={() => setShowFileMenu(false)}>
+                <button onClick={newProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
+                  🆕 New Project
+                </button>
+                <div style={{ height: 1, background: "#33363d" }} />
+                <button onClick={saveProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
+                  💾 Save Project
+                </button>
+                <button onClick={loadProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
+                  📂 Load Project
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        {saveStatus === "saved" && (
+          <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 4 }}>✓ Project saved</div>
+        )}
         <p style={{ fontSize: 12, color: "#888", marginBottom: 14 }}>v2 · procedural + cameras + render</p>
 
         <Section title="Library (GitHub)">
@@ -2004,6 +2238,7 @@ export default function BoothPlannerV2() {
               <div>← →: rotate 15° (Shift = 1°)</div>
               <div>Delete / Backspace: delete</div>
               <div>Ctrl/Cmd + D: duplicate</div>
+              <div>Ctrl/Cmd + Z: undo</div>
               <div>Shift+click: add/remove from selection</div>
               <div>Right-click + drag: orbit camera</div>
             </>
