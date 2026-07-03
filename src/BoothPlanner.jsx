@@ -348,6 +348,10 @@ export default function BoothPlannerV2() {
   const [unit, setUnit] = useState("m");
   const [floorW, setFloorW] = useState(10);
   const [floorD, setFloorD] = useState(8);
+  const floorWRef = useRef(10);
+  const floorDRef = useRef(8);
+  useEffect(() => { floorWRef.current = floorW; }, [floorW]);
+  useEffect(() => { floorDRef.current = floorD; }, [floorD]);
   const [manifestUrl, setManifestUrl] = useState("https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/main/models/manifest.json");
   const [catalog, setCatalog] = useState(DEFAULT_MANIFEST);
   const findDef = useCallback((kindCategory, catalogId) => {
@@ -657,23 +661,23 @@ export default function BoothPlannerV2() {
       // ---- Wall tool flow ----
       if (wallToolActiveRef.current) {
         const ws = wallStateRef.current;
-        const pt = groundPoint(e.clientX, e.clientY);
+        const raw = groundPoint(e.clientX, e.clientY);
         if (!ws.active) {
-          // primer click: solo marca el inicio, espera que el mouse se mueva
+          const { pt } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
           ws.active = true;
           ws.start = pt.clone();
           ws.end = pt.clone();
+          wallStartMarker.visible = false;
         } else {
-          // segundo click: confirma la pared solo si tiene longitud real
           const dx = ws.end.x - ws.start.x, dz = ws.end.z - ws.start.z;
           const len = Math.sqrt(dx * dx + dz * dz);
           if (len > 0.05) {
             const cfg = wallConfigRef.current;
             const uid = `wall_${Date.now()}`;
             threeRef.current.commitWall({ uid, x1: ws.start.x, z1: ws.start.z, x2: ws.end.x, z2: ws.end.z, ...cfg });
-            // encadenar: el final de esta pared es el inicio de la siguiente
             ws.start = ws.end.clone();
             ws.end = ws.start.clone();
+            snapIndicator.visible = false;
             threeRef.current.clearWallGhost();
           }
         }
@@ -769,6 +773,52 @@ export default function BoothPlannerV2() {
       }
     };
     const SNAP_STEP = Math.PI / 4; // 45°
+    const WALL_SNAP_RADIUS = 0.4; // metros — distancia para pegar a endpoints
+
+    // Preview marker (cuadradito que sigue al mouse antes del primer click)
+    const wallStartMarker = new THREE.Mesh(
+      new THREE.BoxGeometry(0.18, 0.02, 0.18),
+      new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false })
+    );
+    wallStartMarker.visible = false;
+    wallStartMarker.renderOrder = 999;
+    wallStartMarker.raycast = () => {};
+    scene.add(wallStartMarker);
+
+    // Snap indicator (circulito verde cuando hay snap activo)
+    const snapIndicator = new THREE.Mesh(
+      new THREE.CircleGeometry(0.12, 16),
+      new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, depthTest: false })
+    );
+    snapIndicator.rotation.x = -Math.PI / 2;
+    snapIndicator.position.y = 0.01;
+    snapIndicator.visible = false;
+    snapIndicator.renderOrder = 998;
+    snapIndicator.raycast = () => {};
+    scene.add(snapIndicator);
+
+    // función de snap a endpoints de paredes existentes + bordes del piso
+    const snapWallPoint = (rawPt, freePos, walls, floorW, floorD) => {
+      if (freePos) return { pt: rawPt, snapped: false };
+      const candidates = [];
+      // endpoints de paredes existentes
+      walls.forEach((w) => {
+        candidates.push(new THREE.Vector3(w.x1, 0, w.z1));
+        candidates.push(new THREE.Vector3(w.x2, 0, w.z2));
+      });
+      // bordes del piso (4 esquinas + centros de borde)
+      const hw = floorW / 2, hd = floorD / 2;
+      [[-hw,-hd],[-hw,0],[-hw,hd],[0,-hd],[0,hd],[hw,-hd],[hw,0],[hw,hd]].forEach(([x,z]) => {
+        candidates.push(new THREE.Vector3(x, 0, z));
+      });
+      let best = null, bestDist = WALL_SNAP_RADIUS;
+      candidates.forEach((c) => {
+        const d = rawPt.distanceTo(c);
+        if (d < bestDist) { bestDist = d; best = c; }
+      });
+      return best ? { pt: best, snapped: true } : { pt: rawPt, snapped: false };
+    };
+
     const snapLineEnd = (start, rawEnd, free) => {
       if (free) return rawEnd;
       const dir = new THREE.Vector3().subVectors(rawEnd, start);
@@ -779,10 +829,24 @@ export default function BoothPlannerV2() {
       return new THREE.Vector3(start.x + Math.sin(snapped) * len, 0, start.z + Math.cos(snapped) * len);
     };
     const onMoveDrag = (e) => {
-      if (wallToolActiveRef.current && wallStateRef.current.active) {
+      if (wallToolActiveRef.current) {
         const raw = groundPoint(e.clientX, e.clientY);
-        wallStateRef.current.end = e.shiftKey ? raw : snapLineEnd(wallStateRef.current.start, raw, e.altKey);
-        threeRef.current.updateWallGhost(wallStateRef.current.start, wallStateRef.current.end, wallConfigRef.current);
+        const ws = wallStateRef.current;
+        if (!ws.active) {
+          // antes del primer click: mostrar preview de inicio con snap de posición
+          const { pt, snapped } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
+          wallStartMarker.position.set(pt.x, 0.01, pt.z);
+          wallStartMarker.visible = true;
+          wallStartMarker.material.color.set(snapped ? 0x00ff88 : 0x00e5ff);
+          snapIndicator.visible = false;
+        } else {
+          // después del primer click: mover el endpoint con snap de posición + ángulo
+          const { pt: posSnapped, snapped: didSnap } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
+          ws.end = e.altKey ? posSnapped : snapLineEnd(ws.start, posSnapped, false);
+          snapIndicator.position.set(posSnapped.x, 0.01, posSnapped.z);
+          snapIndicator.visible = didSnap;
+          threeRef.current.updateWallGhost(ws.start, ws.end, wallConfigRef.current);
+        }
         return;
       }
       // drag de pared seleccionada
@@ -914,6 +978,8 @@ export default function BoothPlannerV2() {
       clearWallGhost: () => {
         const wg = threeRef.current.wallGhost;
         if (wg) { threeRef.current.scene.remove(wg); threeRef.current.wallGhost = null; }
+        wallStartMarker.visible = false;
+        snapIndicator.visible = false;
       },
       updateWallGhost: (start, end, cfg) => {
         const wg = threeRef.current.wallGhost;
@@ -1309,7 +1375,6 @@ export default function BoothPlannerV2() {
       const inInput = e.target && e.target.tagName === "INPUT" && e.target.type !== "color" && e.target.type !== "range";
 
       if (e.key === "Escape") {
-        // cancel wall tool
         if (wallToolActive) {
           wallStateRef.current = { active: false, start: null, end: null };
           threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
@@ -1635,7 +1700,7 @@ export default function BoothPlannerV2() {
           <button
             onClick={() => {
               setWallToolActive((v) => {
-                if (v) { // canceling
+                if (v) {
                   wallStateRef.current = { active: false, start: null, end: null };
                   threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
                 }
