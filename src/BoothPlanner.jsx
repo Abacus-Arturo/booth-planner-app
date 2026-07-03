@@ -1238,11 +1238,16 @@ export default function BoothPlannerV2() {
 
       if (realModel) {
         applyColorToContainer(realModel, it.color || def.color || "#888888");
+        // DEBUG: ver qué nodos tiene el modelo real
+        const nodeNames = [];
+        realModel.traverse((c) => { if (c.name) nodeNames.push(c.name); });
+        console.log(`[socket debug] ${def.name} nodes:`, nodeNames);
         // apply sockets: visibility for simple ones, shelf array for repeatable ones
         (def.sockets || []).forEach((socketDef) => {
           const sName = getSocketName(socketDef);
           const accessoryFile = getSocketAccessoryFile(socketDef);
           const socketObj = realModel.getObjectByName(sName);
+          console.log(`[socket debug] looking for "${sName}" → found:`, !!socketObj);
           if (!socketObj) return;
           if (isRepeatableSocket(sName)) {
             const cfg = (it.sockets && it.sockets[sName]) || null;
