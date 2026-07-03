@@ -800,17 +800,22 @@ export default function BoothPlannerV2() {
     // función de snap a endpoints de paredes existentes + bordes del piso
     const snapWallPoint = (rawPt, freePos, walls, floorW, floorD) => {
       if (freePos) return { pt: rawPt, snapped: false };
+      const t = (wallConfigRef.current.thickness || 0.1) / 2; // offset para que la pared quede dentro del piso
       const candidates = [];
       // endpoints de paredes existentes
       walls.forEach((w) => {
         candidates.push(new THREE.Vector3(w.x1, 0, w.z1));
         candidates.push(new THREE.Vector3(w.x2, 0, w.z2));
       });
-      // bordes del piso (4 esquinas + centros de borde)
-      const hw = floorW / 2, hd = floorD / 2;
-      [[-hw,-hd],[-hw,0],[-hw,hd],[0,-hd],[0,hd],[hw,-hd],[hw,0],[hw,hd]].forEach(([x,z]) => {
-        candidates.push(new THREE.Vector3(x, 0, z));
-      });
+      // bordes del piso desplazados hacia adentro por thickness/2
+      const hw = floorW / 2 - t, hd = floorD / 2 - t;
+      const hwO = floorW / 2, hdO = floorD / 2; // esquinas exactas (sin offset, para snap corner-to-corner)
+      [
+        // centros de cada borde (desplazados adentro)
+        [-hw, 0], [hw, 0], [0, -hd], [0, hd],
+        // esquinas (desplazadas adentro en ambos ejes)
+        [-hw, -hd], [-hw, hd], [hw, -hd], [hw, hd],
+      ].forEach(([x, z]) => candidates.push(new THREE.Vector3(x, 0, z)));
       let best = null, bestDist = WALL_SNAP_RADIUS;
       candidates.forEach((c) => {
         const d = rawPt.distanceTo(c);
