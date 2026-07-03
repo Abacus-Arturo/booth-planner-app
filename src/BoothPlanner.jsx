@@ -352,6 +352,14 @@ export default function BoothPlannerV2() {
   const floorDRef = useRef(8);
   useEffect(() => { floorWRef.current = floorW; }, [floorW]);
   useEffect(() => { floorDRef.current = floorD; }, [floorD]);
+
+  // Floor appearance
+  const [floorColor, setFloorColor] = useState("#e9e9e9");
+
+  // Floor plan image
+  const [floorPlan, setFloorPlan] = useState(null); // { dataUrl, realW, realH, opacity, x, z, visible }
+  const [floorPlanModal, setFloorPlanModal] = useState(null); // { step: 'calibrate'|'outline', dataUrl, ... }
+  const floorPlanFileRef = useRef(null);
   const [manifestUrl, setManifestUrl] = useState("https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/main/models/manifest.json");
   const [catalog, setCatalog] = useState(DEFAULT_MANIFEST);
   const findDef = useCallback((kindCategory, catalogId) => {
@@ -1048,12 +1056,35 @@ export default function BoothPlannerV2() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Floor size sync
+  // Floor size + color sync
   useEffect(() => {
     const { floor } = threeRef.current;
     if (!floor) return;
     floor.scale.set(floorW, floorD, 1);
-  }, [floorW, floorD]);
+    if (floor.material) floor.material.color.set(floorColor);
+  }, [floorW, floorD, floorColor]);
+
+  // ===================== Floor plan image sync =====================
+  useEffect(() => {
+    const { scene } = threeRef.current;
+    if (!scene) return;
+    // remove existing floor plan mesh
+    const existing = scene.getObjectByName("__floorPlanMesh");
+    if (existing) scene.remove(existing);
+    if (!floorPlan) return;
+    const tex = new THREE.TextureLoader().load(floorPlan.dataUrl);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: floorPlan.opacity ?? 0.5, depthWrite: false });
+    const geo = new THREE.PlaneGeometry(floorPlan.realW, floorPlan.realH);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = "__floorPlanMesh";
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(floorPlan.x ?? 0, 0.005, floorPlan.z ?? 0);
+    mesh.visible = floorPlan.visible !== false;
+    mesh.renderOrder = -1;
+    scene.add(mesh);
+    return () => { scene.remove(mesh); mat.dispose(); geo.dispose(); };
+  }, [floorPlan]);
 
   // ===================== Sync walls -> meshes =====================
   useEffect(() => {
@@ -1633,6 +1664,60 @@ export default function BoothPlannerV2() {
   const deleteCamera = (id) => setCameras((prev) => prev.filter((c) => c.id !== id));
 
   // ===================== Render capture =====================
+  const handleLoadFloorPlan = () => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/png,image/jpeg,image/jpg";
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        setFloorPlanModal({ step: "calibrate", dataUrl: ev.target.result });
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+
+  const handleCalibrateConfirm = ({ scale, imgW, imgH }) => {
+    // scale = meters per pixel
+    const realW = imgW * scale;
+    const realH = imgH * scale;
+    // store scale info and move to outline step
+    setFloorPlanModal((m) => ({ ...m, step: "outline", scale, imgW, imgH, realW, realH }));
+  };
+
+  const handleOutlineConfirm = (outlinePoints) => {
+    const m = floorPlanModal;
+    const realW = m.realW, realH = m.realH;
+    const scale = m.scale;
+
+    if (outlinePoints && outlinePoints.length >= 3) {
+      // convertir puntos a metros (relativos al centro de la imagen)
+      const pts = outlinePoints.map((p) => ({
+        x: (p.x - m.imgW / 2) * scale,
+        z: (p.y - m.imgH / 2) * scale,
+      }));
+      const xs = pts.map((p) => p.x), zs = pts.map((p) => p.z);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minZ = Math.min(...zs), maxZ = Math.max(...zs);
+      const w = maxX - minX;
+      const d = maxZ - minZ;
+      // centroide del contorno = offset del piso respecto al centro de la imagen
+      const cx = (minX + maxX) / 2;
+      const cz = (minZ + maxZ) / 2;
+      setFloorW(w); setFloorD(d);
+      // el plano de la imagen se centra en (0,0,0) pero el piso (floor mesh) se posiciona en el centroide
+      // Para alinearlos: movemos el plano de imagen al negativo del centroide,
+      // así el área del contorno queda centrada en (0,0,0) donde está el piso
+      setFloorPlan({ dataUrl: m.dataUrl, realW, realH, opacity: 0.5, x: -cx, z: -cz, visible: true });
+    } else {
+      setFloorW(realW); setFloorD(realH);
+      setFloorPlan({ dataUrl: m.dataUrl, realW, realH, opacity: 0.5, x: 0, z: 0, visible: true });
+    }
+    setFloorPlanModal(null);
+  };
+
   const captureRender = () => {
     const { scene, renderer, getActiveCamera } = threeRef.current;
     const cam = getActiveCamera();
@@ -1652,6 +1737,16 @@ export default function BoothPlannerV2() {
   };
 
   return (
+    <>
+    {floorPlanModal && (
+      <FloorPlanModal
+        modal={floorPlanModal}
+        onConfirmCalibrate={handleCalibrateConfirm}
+        onConfirmOutline={handleOutlineConfirm}
+        onCancel={() => setFloorPlanModal(null)}
+        unit={unit} UNITS={UNITS} toMeters={toMeters} fmt={fmt} metersTo={metersTo}
+      />
+    )}
     <div style={{ display: "flex", height: "100vh", width: "100%", background: "#13151a", color: "#eee", fontFamily: "Inter, system-ui, sans-serif" }}>
       {/* Sidebar */}
       <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderRight: "1px solid #2a2d34" }}>
@@ -1685,13 +1780,42 @@ export default function BoothPlannerV2() {
         </Section>
 
         <Section title={`Floor (${UNITS[unit].label})`}>
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
             <input type="number" min="0.5" step="0.1" value={fmt(metersTo(floorW, unit))}
               onChange={(e) => setFloorW(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} />
             <span style={{ alignSelf: "center", color: "#666" }}>×</span>
             <input type="number" min="0.5" step="0.1" value={fmt(metersTo(floorD, unit))}
               onChange={(e) => setFloorD(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} />
           </div>
+          <label style={labelStyle}>Floor color</label>
+          <input type="color" value={floorColor} onChange={(e) => setFloorColor(e.target.value)}
+            style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 8 }} />
+          <button onClick={handleLoadFloorPlan} style={{ ...btnStyle, width: "100%", marginBottom: floorPlan ? 8 : 0 }}>
+            🗺 {floorPlan ? "Replace floor plan" : "Load floor plan"}
+          </button>
+          {floorPlan && (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                  <input type="checkbox" checked={floorPlan.visible !== false}
+                    onChange={(e) => setFloorPlan((f) => ({ ...f, visible: e.target.checked }))} />
+                  Show floor plan
+                </label>
+                <button onClick={() => setFloorPlan(null)} style={{ ...btnStyle, background: "#5a2424", padding: "4px 8px", fontSize: 11 }}>Remove</button>
+              </div>
+              <label style={labelStyle}>Opacity</label>
+              <input type="range" min="0.05" max="1" step="0.05" value={floorPlan.opacity ?? 0.5}
+                onChange={(e) => setFloorPlan((f) => ({ ...f, opacity: parseFloat(e.target.value) }))}
+                style={{ width: "100%", marginBottom: 6 }} />
+              <label style={labelStyle}>Position ({UNITS[unit].label})</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input type="number" step="0.1" value={fmt(metersTo(floorPlan.x ?? 0, unit))}
+                  onChange={(e) => setFloorPlan((f) => ({ ...f, x: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={inputStyle} placeholder="x" />
+                <input type="number" step="0.1" value={fmt(metersTo(floorPlan.z ?? 0, unit))}
+                  onChange={(e) => setFloorPlan((f) => ({ ...f, z: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={inputStyle} placeholder="z" />
+              </div>
+            </>
+          )}
         </Section>
 
         {/* Dynamic categories from manifest — exclude Props (they go in Props section) */}
@@ -2120,6 +2244,193 @@ export default function BoothPlannerV2() {
               <path d="M9 9h6v6H9z"/>
             </svg>
             <span style={{ fontSize: 11, color: "#999", textAlign: "center" }}>Select an object<br/>to edit properties</span>
+          </div>
+        )}
+      </div>
+    </div>
+    </>
+  );
+}
+
+function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onCancel, unit, UNITS, toMeters, fmt, metersTo }) {
+  const canvasRef = React.useRef(null);
+  const [localUnit, setLocalUnit] = React.useState(unit);
+  const [zoom, setZoom] = React.useState(1);
+  const [pan, setPan] = React.useState({ x: 0, y: 0 });
+  const [points, setPoints] = React.useState([]); // calibration points [{x,y}] in image coords
+  const [outlinePoints, setOutlinePoints] = React.useState([]);
+  const [distance, setDistance] = React.useState("3");
+  const [img, setImg] = React.useState(null);
+  const isPanning = React.useRef(false);
+  const lastPan = React.useRef({ x: 0, y: 0 });
+
+  React.useEffect(() => {
+    if (!modal?.dataUrl) return;
+    const image = new Image();
+    image.onload = () => {
+      setImg(image);
+      // calcular zoom y pan para que la imagen quepa centrada en el canvas (800x500)
+      const canvasW = 800, canvasH = 500;
+      const scaleToFit = Math.min(canvasW / image.naturalWidth, canvasH / image.naturalHeight) * 0.9;
+      setZoom(scaleToFit);
+      setPan({ x: (canvasW - image.naturalWidth * scaleToFit) / 2, y: (canvasH - image.naturalHeight * scaleToFit) / 2 });
+    };
+    image.src = modal.dataUrl;
+  }, [modal?.dataUrl]);
+
+  React.useEffect(() => {
+    const el = canvasRef.current;
+    if (!el || !img) return;
+    const ctx = el.getContext("2d");
+    ctx.clearRect(0, 0, el.width, el.height);
+    ctx.save();
+    ctx.translate(pan.x, pan.y);
+    ctx.scale(zoom, zoom);
+    ctx.drawImage(img, 0, 0);
+    const pts = modal.step === 'calibrate' ? points : outlinePoints;
+    ctx.strokeStyle = "#00e5ff"; ctx.fillStyle = "#00e5ff"; ctx.lineWidth = 2 / zoom;
+    pts.forEach((p, i) => {
+      ctx.beginPath(); ctx.arc(p.x, p.y, 6 / zoom, 0, Math.PI * 2); ctx.fill();
+      if (i > 0) { ctx.beginPath(); ctx.moveTo(pts[i-1].x, pts[i-1].y); ctx.lineTo(p.x, p.y); ctx.stroke(); }
+    });
+    if (modal.step === 'calibrate' && points.length === 2) {
+      ctx.fillStyle = "#fff"; ctx.font = `${14/zoom}px sans-serif`;
+      ctx.fillText(`${distance} ${UNITS[unit].label}`, (points[0].x + points[1].x)/2, (points[0].y + points[1].y)/2 - 8/zoom);
+    }
+    if (modal.step === 'outline' && outlinePoints.length > 2) {
+      ctx.strokeStyle = "#c4622d"; ctx.beginPath();
+      ctx.moveTo(outlinePoints[0].x, outlinePoints[0].y);
+      outlinePoints.forEach((p) => ctx.lineTo(p.x, p.y));
+      ctx.closePath(); ctx.stroke();
+      ctx.fillStyle = "rgba(196,98,45,0.15)"; ctx.fill();
+    }
+    ctx.restore();
+  }, [img, zoom, pan, points, outlinePoints, modal.step, distance, unit]);
+
+  const getCanvasPoint = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    // el canvas tiene tamaño interno (width/height) distinto al visual (rect) — hay que escalar
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const cx = ((e.clientX - rect.left) * scaleX - pan.x) / zoom;
+    const cy = ((e.clientY - rect.top) * scaleY - pan.y) / zoom;
+    return { x: cx, y: cy };
+  };
+
+  const handleCanvasClick = (e) => {
+    if (e.button !== 0) return;
+    const pt = getCanvasPoint(e);
+    if (modal.step === 'calibrate') {
+      if (points.length < 2) setPoints((prev) => [...prev, pt]);
+    } else {
+      setOutlinePoints((prev) => [...prev, pt]);
+    }
+  };
+
+  const handleWheel = (e) => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.85 : 1.18;
+    setZoom((z) => Math.min(Math.max(z * factor, 0.2), 8));
+  };
+
+  const handleMouseDown = (e) => { if (e.button === 1 || e.button === 2) { isPanning.current = true; lastPan.current = { x: e.clientX, y: e.clientY }; } };
+  const handleMouseMove = (e) => {
+    if (!isPanning.current) return;
+    const dx = e.clientX - lastPan.current.x, dy = e.clientY - lastPan.current.y;
+    lastPan.current = { x: e.clientX, y: e.clientY };
+    setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+  };
+  const handleMouseUp = () => { isPanning.current = false; };
+
+  const canConfirmCalibrate = points.length === 2 && parseFloat(distance) > 0;
+  const canConfirmOutline = outlinePoints.length >= 3;
+
+  const handleConfirmCalibrate = () => {
+    if (!canConfirmCalibrate || !img) return;
+    const dx = points[1].x - points[0].x, dy = points[1].y - points[0].y;
+    const pixelDist = Math.sqrt(dx * dx + dy * dy);
+    const realDist = toMeters(parseFloat(distance), localUnit);
+    const scale = realDist / pixelDist; // meters per pixel
+    onConfirmCalibrate({ scale, imgW: img.naturalWidth, imgH: img.naturalHeight });
+  };
+
+  const handleConfirmOutline = () => {
+    if (!canConfirmOutline) return;
+    onConfirmOutline(outlinePoints);
+  };
+
+  if (!modal) return null;
+  const W = img ? img.naturalWidth : 800;
+  const H = img ? img.naturalHeight : 600;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.85)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#1b1d22", borderRadius: 12, padding: 20, width: "90vw", maxWidth: 900, maxHeight: "90vh", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ fontSize: 16, fontWeight: 700, color: "#eee" }}>
+            {modal.step === 'calibrate' ? "Step 1 — Calibrate scale" : "Step 2 — Trace floor outline"}
+          </h2>
+          <button onClick={onCancel} style={{ background: "#5a2424", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer" }}>Cancel</button>
+        </div>
+        <p style={{ fontSize: 12, color: "#999", margin: 0 }}>
+          {modal.step === 'calibrate'
+            ? "Click two points on a wall or dimension you know the real size of. Scroll to zoom, middle-click to pan."
+            : "Click to trace the floor outline polygon. Double-click last point or click Confirm when done. Scroll to zoom, middle-click to pan."}
+        </p>
+
+        {/* Canvas */}
+        <div style={{ flex: 1, overflow: "hidden", border: "1px solid #33363d", borderRadius: 8, cursor: "crosshair", minHeight: 400, position: "relative" }}
+          onWheel={handleWheel}
+          onMouseDown={(e) => { handleCanvasClick(e); handleMouseDown(e); }}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <canvas ref={canvasRef} width={800} height={500} style={{ width: "100%", height: "100%", display: "block" }} />
+        </div>
+
+        {/* Controls */}
+        {modal.step === 'calibrate' && (
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 12, color: "#999" }}>Points: {points.length}/2</span>
+            <span style={{ fontSize: 12, color: "#999" }}>Real distance:</span>
+            <input type="number" min="0.01" step="0.1" value={distance}
+              onChange={(e) => setDistance(e.target.value)}
+              style={{ width: 80, background: "#22242a", border: "1px solid #33363d", borderRadius: 6, color: "#fff", padding: "4px 8px", fontSize: 12 }} />
+            <div style={{ display: "flex", gap: 3 }}>
+              {Object.keys(UNITS).map((u) => (
+                <button key={u} onClick={() => setLocalUnit(u)}
+                  style={{ padding: "3px 7px", fontSize: 11, borderRadius: 4, border: "1px solid " + (localUnit === u ? "#c4622d" : "#33363d"), background: localUnit === u ? "#c4622d" : "#22242a", color: "#fff", cursor: "pointer" }}>
+                  {UNITS[u].label}
+                </button>
+              ))}
+            </div>
+            <button onClick={() => setPoints([])} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Reset points</button>
+            <div style={{ flex: 1 }} />
+            <button
+              onClick={handleConfirmCalibrate}
+              disabled={!canConfirmCalibrate}
+              style={{ background: canConfirmCalibrate ? "#2d6a4f" : "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "8px 20px", cursor: canConfirmCalibrate ? "pointer" : "default", fontSize: 13, fontWeight: 600 }}
+            >
+              {modal.skipOutline ? "Confirm & Place" : "Next: Trace outline →"}
+            </button>
+          </div>
+        )}
+        {modal.step === 'outline' && (
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 12, color: "#999" }}>Points: {outlinePoints.length} (min 3)</span>
+            <button onClick={() => setOutlinePoints((p) => p.slice(0,-1))} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Undo last</button>
+            <button onClick={() => setOutlinePoints([])} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Reset</button>
+            <button onClick={() => onConfirmOutline(null)} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Skip (use rectangle)</button>
+            <div style={{ flex: 1 }} />
+            <button
+              onClick={handleConfirmOutline}
+              disabled={!canConfirmOutline}
+              style={{ background: canConfirmOutline ? "#2d6a4f" : "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "8px 20px", cursor: canConfirmOutline ? "pointer" : "default", fontSize: 13, fontWeight: 600 }}
+            >
+              Confirm outline ✓
+            </button>
           </div>
         )}
       </div>
