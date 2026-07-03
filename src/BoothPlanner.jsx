@@ -978,7 +978,70 @@ export default function BoothPlannerV2() {
       commitLineItems: (newItems) => setItems((prev) => [...prev, ...newItems]),
       clearPendingLine: () => setPendingLineDef(null),
       setLineCountUI: (n) => setLineCount(n),
-      commitWall: (wall) => setWalls((prev) => [...prev, wall]),
+      commitWall: (wall) => setWalls((prev) => {
+        // miter join: para cada endpoint de la nueva pared, busca si hay una pared existente
+        // que comparta ese punto y recalcula ambas para que se unan limpiamente en ángulo bisector
+        const miter = (walls, newWall, newPtKey, existingPtKey) => {
+          // newPtKey: 'start'|'end' de la nueva pared que puede estar conectada
+          // existingPtKey: 'x1z1'|'x2z2' del endpoint de la pared existente
+          const nx = newPtKey === 'start' ? newWall.x1 : newWall.x2;
+          const nz = newPtKey === 'start' ? newWall.z1 : newWall.z2;
+          const EPS = 0.05;
+          let updated = [...walls];
+          const matchIdx = updated.findIndex((w) => {
+            if (w.uid === newWall.uid) return false;
+            const d1 = Math.hypot(w.x1 - nx, w.z1 - nz);
+            const d2 = Math.hypot(w.x2 - nx, w.z2 - nz);
+            return d1 < EPS || d2 < EPS;
+          });
+          if (matchIdx === -1) return { walls: updated, wall: newWall };
+          const existing = updated[matchIdx];
+          const existingAtStart = Math.hypot(existing.x1 - nx, existing.z1 - nz) < EPS;
+
+          // dirección de cada pared (normalizada, apuntando HACIA el punto de conexión)
+          const newDx = newPtKey === 'start' ? newWall.x1 - newWall.x2 : newWall.x2 - newWall.x1;
+          const newDz = newPtKey === 'start' ? newWall.z1 - newWall.z2 : newWall.z2 - newWall.z1;
+          const newLen = Math.hypot(newDx, newDz) || 1;
+
+          const exDx = existingAtStart ? existing.x1 - existing.x2 : existing.x2 - existing.x1;
+          const exDz = existingAtStart ? existing.z1 - existing.z2 : existing.z2 - existing.z1;
+          const exLen = Math.hypot(exDx, exDz) || 1;
+
+          // bisector normalizado
+          const bx = (newDx / newLen + exDx / exLen);
+          const bz = (newDz / newLen + exDz / exLen);
+          const bLen = Math.hypot(bx, bz);
+          if (bLen < 0.001) return { walls: updated, wall: newWall }; // paredes paralelas, no hay miter
+
+          // grosor de la pared para calcular el offset del miter
+          const t = newWall.thickness || 0.1;
+          // ángulo entre las dos direcciones
+          const cosA = (newDx / newLen) * (exDx / exLen) + (newDz / newLen) * (exDz / exLen);
+          const sinHalfA = Math.sqrt(Math.max(0, (1 - cosA) / 2));
+          const miterOffset = sinHalfA > 0.05 ? (t / 2) / sinHalfA : t / 2;
+          const mx = (bx / bLen) * miterOffset;
+          const mz = (bz / bLen) * miterOffset;
+          const miterPt = { x: nx + mx, z: nz + mz };
+
+          // aplicar el punto miter a la nueva pared
+          const updatedNew = { ...newWall };
+          if (newPtKey === 'start') { updatedNew.x1 = miterPt.x; updatedNew.z1 = miterPt.z; }
+          else { updatedNew.x2 = miterPt.x; updatedNew.z2 = miterPt.z; }
+
+          // aplicar el punto miter a la pared existente
+          const updatedExisting = { ...existing };
+          if (existingAtStart) { updatedExisting.x1 = miterPt.x; updatedExisting.z1 = miterPt.z; }
+          else { updatedExisting.x2 = miterPt.x; updatedExisting.z2 = miterPt.z; }
+          updated[matchIdx] = updatedExisting;
+
+          return { walls: updated, wall: updatedNew };
+        };
+
+        // aplicar miter en ambos endpoints de la nueva pared
+        let { walls: w1, wall: nw1 } = miter(prev, wall, 'start', '');
+        let { walls: w2, wall: nw2 } = miter(w1, nw1, 'end', '');
+        return [...w2, nw2];
+      }),
       moveWall: (uid, x1, z1, x2, z2) => setWalls((prev) => prev.map((w) => w.uid === uid ? { ...w, x1, z1, x2, z2 } : w)),
       clearWallGhost: () => {
         const wg = threeRef.current.wallGhost;
