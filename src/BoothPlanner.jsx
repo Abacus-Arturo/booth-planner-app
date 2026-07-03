@@ -979,68 +979,33 @@ export default function BoothPlannerV2() {
       clearPendingLine: () => setPendingLineDef(null),
       setLineCountUI: (n) => setLineCount(n),
       commitWall: (wall) => setWalls((prev) => {
-        // miter join: para cada endpoint de la nueva pared, busca si hay una pared existente
-        // que comparta ese punto y recalcula ambas para que se unan limpiamente en ángulo bisector
-        const miter = (walls, newWall, newPtKey, existingPtKey) => {
-          // newPtKey: 'start'|'end' de la nueva pared que puede estar conectada
-          // existingPtKey: 'x1z1'|'x2z2' del endpoint de la pared existente
-          const nx = newPtKey === 'start' ? newWall.x1 : newWall.x2;
-          const nz = newPtKey === 'start' ? newWall.z1 : newWall.z2;
-          const EPS = 0.05;
-          let updated = [...walls];
-          const matchIdx = updated.findIndex((w) => {
-            if (w.uid === newWall.uid) return false;
-            const d1 = Math.hypot(w.x1 - nx, w.z1 - nz);
-            const d2 = Math.hypot(w.x2 - nx, w.z2 - nz);
-            return d1 < EPS || d2 < EPS;
-          });
-          if (matchIdx === -1) return { walls: updated, wall: newWall };
-          const existing = updated[matchIdx];
-          const existingAtStart = Math.hypot(existing.x1 - nx, existing.z1 - nz) < EPS;
+        const EPS = 0.08;
+        const t = (wall.thickness || 0.1) / 2;
 
-          // dirección de cada pared (normalizada, apuntando HACIA el punto de conexión)
-          const newDx = newPtKey === 'start' ? newWall.x1 - newWall.x2 : newWall.x2 - newWall.x1;
-          const newDz = newPtKey === 'start' ? newWall.z1 - newWall.z2 : newWall.z2 - newWall.z1;
-          const newLen = Math.hypot(newDx, newDz) || 1;
-
-          const exDx = existingAtStart ? existing.x1 - existing.x2 : existing.x2 - existing.x1;
-          const exDz = existingAtStart ? existing.z1 - existing.z2 : existing.z2 - existing.z1;
-          const exLen = Math.hypot(exDx, exDz) || 1;
-
-          // bisector normalizado
-          const bx = (newDx / newLen + exDx / exLen);
-          const bz = (newDz / newLen + exDz / exLen);
-          const bLen = Math.hypot(bx, bz);
-          if (bLen < 0.001) return { walls: updated, wall: newWall }; // paredes paralelas, no hay miter
-
-          // grosor de la pared para calcular el offset del miter
-          const t = newWall.thickness || 0.1;
-          // ángulo entre las dos direcciones
-          const cosA = (newDx / newLen) * (exDx / exLen) + (newDz / newLen) * (exDz / exLen);
-          const sinHalfA = Math.sqrt(Math.max(0, (1 - cosA) / 2));
-          const miterOffset = sinHalfA > 0.05 ? (t / 2) / sinHalfA : t / 2;
-          const mx = (bx / bLen) * miterOffset;
-          const mz = (bz / bLen) * miterOffset;
-          const miterPt = { x: nx + mx, z: nz + mz };
-
-          // aplicar el punto miter a la nueva pared
-          const updatedNew = { ...newWall };
-          if (newPtKey === 'start') { updatedNew.x1 = miterPt.x; updatedNew.z1 = miterPt.z; }
-          else { updatedNew.x2 = miterPt.x; updatedNew.z2 = miterPt.z; }
-
-          // aplicar el punto miter a la pared existente
-          const updatedExisting = { ...existing };
-          if (existingAtStart) { updatedExisting.x1 = miterPt.x; updatedExisting.z1 = miterPt.z; }
-          else { updatedExisting.x2 = miterPt.x; updatedExisting.z2 = miterPt.z; }
-          updated[matchIdx] = updatedExisting;
-
-          return { walls: updated, wall: updatedNew };
+        const extendExistingAtPoint = (walls, nx, nz) => {
+          const matchIdx = walls.findIndex((w) =>
+            Math.hypot(w.x1 - nx, w.z1 - nz) < EPS ||
+            Math.hypot(w.x2 - nx, w.z2 - nz) < EPS
+          );
+          if (matchIdx === -1) return walls;
+          const ex = walls[matchIdx];
+          const atStart = Math.hypot(ex.x1 - nx, ex.z1 - nz) < EPS;
+          // dirección de la pared existente hacia fuera (desde el interior hacia el endpoint)
+          const dx = atStart ? ex.x1 - ex.x2 : ex.x2 - ex.x1;
+          const dz = atStart ? ex.z1 - ex.z2 : ex.z2 - ex.z1;
+          const len = Math.hypot(dx, dz) || 1;
+          const ext = { ...ex };
+          if (atStart) { ext.x1 += (dx / len) * t; ext.z1 += (dz / len) * t; }
+          else { ext.x2 += (dx / len) * t; ext.z2 += (dz / len) * t; }
+          const updated = [...walls];
+          updated[matchIdx] = ext;
+          return updated;
         };
 
-        // aplicar miter en ambos endpoints de la nueva pared
-        let { walls: w1, wall: nw1 } = miter(prev, wall, 'start', '');
-        let { walls: w2, wall: nw2 } = miter(w1, nw1, 'end', '');
-        return [...w2, nw2];
+        // extender pared existente en el punto de inicio y fin de la nueva pared
+        let updated = extendExistingAtPoint(prev, wall.x1, wall.z1);
+        updated = extendExistingAtPoint(updated, wall.x2, wall.z2);
+        return [...updated, wall];
       }),
       moveWall: (uid, x1, z1, x2, z2) => setWalls((prev) => prev.map((w) => w.uid === uid ? { ...w, x1, z1, x2, z2 } : w)),
       clearWallGhost: () => {
@@ -1314,7 +1279,28 @@ export default function BoothPlannerV2() {
             const baseHeight = (cfg && cfg.baseHeight) || 0.3;
             socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
           } else {
-            socketObj.visible = !!(it.sockets && it.sockets[sName]);
+            const on = !!(it.sockets && it.sockets[sName]);
+            const accessoryFile = getSocketAccessoryFile(socketDef);
+            const existing = socketObj.children.find((c) => c.userData.isAccessory);
+            if (on && !existing) {
+              if (accessoryFile) {
+                getModelClone(accessoryFile).then((clone) => {
+                  if (!socketObj.parent) return;
+                  clone.userData.isAccessory = true;
+                  socketObj.add(clone);
+                }).catch(() => {
+                  const acc = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), new THREE.MeshStandardMaterial({ color: 0xffe08a }));
+                  acc.userData.isAccessory = true;
+                  socketObj.add(acc);
+                });
+              } else {
+                const acc = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), new THREE.MeshStandardMaterial({ color: 0xffe08a, emissive: 0x664400 }));
+                acc.userData.isAccessory = true;
+                socketObj.add(acc);
+              }
+            } else if (!on && existing) {
+              socketObj.remove(existing);
+            }
           }
         });
       } else {
@@ -1395,12 +1381,29 @@ export default function BoothPlannerV2() {
               socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
             } else {
               const on = it.sockets && it.sockets[sName];
-              let acc = socketObj.children[0];
-              if (on && !acc) {
-                acc = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), new THREE.MeshStandardMaterial({ color: 0xffe08a, emissive: 0x664400 }));
-                socketObj.add(acc);
-              } else if (!on && acc) {
-                socketObj.remove(acc);
+              const accessoryFile = getSocketAccessoryFile(socketDef);
+              const existing = socketObj.children.find((c) => c.userData.isAccessory);
+              if (on && !existing) {
+                if (accessoryFile) {
+                  getModelClone(accessoryFile).then((clone) => {
+                    if (!socketObj.parent) return;
+                    // NO reseteamos posición/rotación — el clone hereda la del Empty de Blender
+                    // NO aplicamos color — la lámpara mantiene sus materiales originales
+                    clone.userData.isAccessory = true;
+                    socketObj.add(clone);
+                  }).catch(() => {
+                    // fallback: esfera placeholder si no carga
+                    const acc = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), new THREE.MeshStandardMaterial({ color: 0xffe08a }));
+                    acc.userData.isAccessory = true;
+                    socketObj.add(acc);
+                  });
+                } else {
+                  const acc = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), new THREE.MeshStandardMaterial({ color: 0xffe08a, emissive: 0x664400 }));
+                  acc.userData.isAccessory = true;
+                  socketObj.add(acc);
+                }
+              } else if (!on && existing) {
+                socketObj.remove(existing);
               }
             }
           });
@@ -1691,32 +1694,37 @@ export default function BoothPlannerV2() {
           </div>
         </Section>
 
-        <Section title={`Models in scene: ${items.filter((it) => it.kind === "model").length}`}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {catalog.map((cat) => (
-              <div key={cat.id} style={{ ...catalogCard, opacity: libraryReady ? 1 : 0.4, pointerEvents: libraryReady ? "auto" : "none" }}>
-                <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: cat, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
-                  <input type="color" value={getCatalogColor(cat)}
-                    onChange={(e) => { e.stopPropagation(); setCatalogColor(cat.id, e.target.value); }}
-                    onClick={(e) => e.stopPropagation()}
-                    title="Click to change color for this model"
-                    style={{ width: 28, height: 28, borderRadius: 4, border: "1px solid rgba(255,255,255,0.2)", padding: 2, cursor: "pointer", flexShrink: 0, background: "none" }}
-                  />
-                  <div style={{ fontSize: 12 }}>
-                    <div>{cat.name}</div>
-                    <div style={{ color: "#777", fontSize: 11 }}>
-                      {fmt(metersTo(cat.w, unit))}×{fmt(metersTo(cat.d, unit))} {UNITS[unit].label} · h {fmt(metersTo(cat.h, unit))}{UNITS[unit].label}
+        {/* Dynamic categories from manifest — exclude Props (they go in Props section) */}
+        {Array.from(new Set(catalog.filter((c) => c.category !== "Props").map((c) => c.category || "Models"))).map((cat) => {
+          const catItems = catalog.filter((c) => (c.category || "Models") === cat && c.category !== "Props");
+          const catCount = items.filter((it) => it.kind === "model" && catItems.some((c) => c.id === it.catalogId)).length;
+          return (
+            <Section key={cat} title={`${cat}: ${catCount}`}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {catItems.map((c) => (
+                  <div key={c.id} style={{ ...catalogCard, opacity: libraryReady ? 1 : 0.4, pointerEvents: libraryReady ? "auto" : "none" }}>
+                    <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: c, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
+                      <input type="color" value={getCatalogColor(c)}
+                        onChange={(e) => { e.stopPropagation(); setCatalogColor(c.id, e.target.value); }}
+                        onClick={(e) => e.stopPropagation()}
+                        title="Click to change color for this model"
+                        style={{ width: 28, height: 28, borderRadius: 4, border: "1px solid rgba(255,255,255,0.2)", padding: 2, cursor: "pointer", flexShrink: 0, background: "none" }}
+                      />
+                      <div style={{ fontSize: 12 }}>
+                        <div>{c.name}</div>
+                        <div style={{ color: "#777", fontSize: 11 }}>
+                          {fmt(metersTo(c.w, unit))}×{fmt(metersTo(c.d, unit))} {UNITS[unit].label} · h {fmt(metersTo(c.h, unit))}{UNITS[unit].label}
+                        </div>
+                      </div>
                     </div>
+                    {!!itemCounts[c.id] && <span style={countBadgeStyle}>{itemCounts[c.id]}</span>}
+                    <button disabled={!libraryReady} onClick={() => setPendingLineDef({ def: c, kind: "model" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
                   </div>
-                </div>
-                {!!itemCounts[cat.id] && (
-                  <span style={countBadgeStyle}>{itemCounts[cat.id]}</span>
-                )}
-                <button disabled={!libraryReady} onClick={() => { setPendingLineDef({ def: cat, kind: "model" }); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
+                ))}
               </div>
-            ))}
-          </div>
-        </Section>
+            </Section>
+          );
+        })}
 
         <Section title={`Primitives in scene: ${items.filter((it) => it.kind === "primitive").length}`}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
