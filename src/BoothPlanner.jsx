@@ -1409,22 +1409,47 @@ export default function BoothPlannerV2() {
   useEffect(() => { duplicateSelectedRef.current = duplicateSelected; });
   const toggleSocket = (sName) => {
     if (!selectedItem) return;
-    const sockets = { ...(selectedItem.sockets || {}) };
-    if (isRepeatableSocket(sName)) {
-      const cur = sockets[sName];
-      sockets[sName] = cur && cur.enabled
-        ? { ...cur, enabled: false }
-        : { enabled: true, count: (cur && cur.count) || 1, spacing: (cur && cur.spacing) || 0.3, baseHeight: (cur && cur.baseHeight) || 0.3 };
+    const buildNewSockets = (current) => {
+      const sockets = { ...(current || {}) };
+      if (isRepeatableSocket(sName)) {
+        const cur = sockets[sName];
+        sockets[sName] = cur && cur.enabled
+          ? { ...cur, enabled: false }
+          : { enabled: true, count: (cur && cur.count) || 1, spacing: (cur && cur.spacing) || 0.3, baseHeight: (cur && cur.baseHeight) || 0.3 };
+      } else {
+        sockets[sName] = !sockets[sName];
+      }
+      return sockets;
+    };
+    // si hay grupo completo seleccionado (2+ piezas del mismo grupo), propagar a todos
+    const isWholeGroup = selectedUids.length > 1 && selectedItem.groupId &&
+      items.filter((it) => selectedUids.includes(it.uid)).every((it) => it.groupId === selectedItem.groupId);
+    if (isWholeGroup) {
+      setItems((prev) => prev.map((it) =>
+        selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it
+      ));
     } else {
-      sockets[sName] = !sockets[sName];
+      updateSelected({ sockets: buildNewSockets(selectedItem.sockets) });
     }
-    updateSelected({ sockets });
   };
+
   const updateSocketConfig = (sName, patch) => {
     if (!selectedItem) return;
-    const sockets = { ...(selectedItem.sockets || {}) };
-    sockets[sName] = { ...sockets[sName], ...patch };
-    updateSelected({ sockets });
+    const buildNewSockets = (current) => {
+      const sockets = { ...(current || {}) };
+      sockets[sName] = { ...sockets[sName], ...patch };
+      return sockets;
+    };
+    // propagar al grupo completo si está todo el grupo seleccionado
+    const isWholeGroup = selectedUids.length > 1 && selectedItem.groupId &&
+      items.filter((it) => selectedUids.includes(it.uid)).every((it) => it.groupId === selectedItem.groupId);
+    if (isWholeGroup) {
+      setItems((prev) => prev.map((it) =>
+        selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it
+      ));
+    } else {
+      updateSelected({ sockets: buildNewSockets(selectedItem.sockets) });
+    }
   };
   const replaceSelected = (newDef, newKind) => {
     if (!selectedItem) return;
@@ -1899,6 +1924,21 @@ export default function BoothPlannerV2() {
                               onChange={(e) => updateSocketConfig(sName, { baseHeight: Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit)) })}
                               style={{ ...inputStyle, padding: "2px 6px" }} />
                           </div>
+                          {/* Apply to all — copia esta config a todos los del mismo modelo */}
+                          <button
+                            onClick={() => {
+                              const socketConfig = selectedItem.sockets[sName];
+                              if (!socketConfig) return;
+                              setItems((prev) => prev.map((it) =>
+                                it.uid !== selectedItem.uid && it.catalogId === selectedItem.catalogId
+                                  ? { ...it, sockets: { ...it.sockets, [sName]: { ...socketConfig } } }
+                                  : it
+                              ));
+                            }}
+                            style={{ ...btnStyle, marginTop: 4, fontSize: 10, padding: "3px 0" }}
+                          >
+                            Apply to all {selectedDef.name}
+                          </button>
                         </div>
                       )}
                     </div>
