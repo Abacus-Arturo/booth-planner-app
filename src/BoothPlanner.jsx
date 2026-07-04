@@ -350,6 +350,7 @@ export default function BoothPlannerV2() {
   const [floorD, setFloorD] = useState(8);
   const [showFileMenu, setShowFileMenu] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null);
+  const [editingName, setEditingName] = useState(false);
   const [projectName, setProjectName] = useState("Untitled Layout");
   const [showSaveModal, setShowSaveModal] = useState(false); // "saved" | null
   const historyRef = useRef([]);
@@ -757,13 +758,17 @@ export default function BoothPlannerV2() {
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, activeCam);
-      // ---- Wall handle drag ----
+      // ---- Wall handle + Line handle drag ----
       const { handleGroup } = threeRef.current;
       if (handleGroup && handleGroup.children.length) {
         const handleHits = raycaster.intersectObjects(handleGroup.children, false);
         if (handleHits.length) {
           const h = handleHits[0].object;
-          draggingWallHandleRef.current = { wallUid: h.userData.wallUid, endpoint: h.userData.endpoint };
+          if (h.userData.isWallHandle) {
+            draggingWallHandleRef.current = { type: 'wall', wallUid: h.userData.wallUid, endpoint: h.userData.endpoint };
+          } else if (h.userData.isLineHandle) {
+            draggingWallHandleRef.current = { type: 'line', groupId: h.userData.groupId, role: h.userData.role, pivotX: h.userData.pivotX, pivotZ: h.userData.pivotZ };
+          }
           dragArmed = false;
           dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
           return;
@@ -881,7 +886,7 @@ export default function BoothPlannerV2() {
       return new THREE.Vector3(start.x + Math.sin(snapped) * len, 0, start.z + Math.cos(snapped) * len);
     };
     const onMoveDrag = (e) => {
-      // ---- Wall handle drag ----
+      // ---- Wall/Line handle drag ----
       if (draggingWallHandleRef.current) {
         if (!dragArmed) {
           const dx = e.clientX - dragStartScreenX, dy = e.clientY - dragStartScreenY;
@@ -889,15 +894,22 @@ export default function BoothPlannerV2() {
           dragArmed = true;
         }
         const raw = groundPoint(e.clientX, e.clientY);
-        const { pt, snapped } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
-        const w = wallsRef.current.find((w) => w.uid === draggingWallHandleRef.current.wallUid);
-        const fixedPt = w ? (draggingWallHandleRef.current.endpoint === 'start'
-          ? new THREE.Vector3(w.x2, 0, w.z2)
-          : new THREE.Vector3(w.x1, 0, w.z1)) : pt;
-        const finalPt = e.altKey ? pt : snapLineEnd(fixedPt, pt, false);
-        snapIndicator.position.set(finalPt.x, 0.01, finalPt.z);
-        snapIndicator.visible = snapped;
-        threeRef.current.moveWallEndpoint(draggingWallHandleRef.current.wallUid, draggingWallHandleRef.current.endpoint, finalPt.x, finalPt.z);
+        const handle = draggingWallHandleRef.current;
+
+        if (handle.type === 'wall') {
+          const { pt, snapped } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
+          const w = wallsRef.current.find((w) => w.uid === handle.wallUid);
+          const fixedPt = w ? (handle.endpoint === 'start' ? new THREE.Vector3(w.x2, 0, w.z2) : new THREE.Vector3(w.x1, 0, w.z1)) : pt;
+          const finalPt = e.altKey ? pt : snapLineEnd(fixedPt, pt, false);
+          snapIndicator.position.set(finalPt.x, 0.01, finalPt.z);
+          snapIndicator.visible = snapped;
+          threeRef.current.moveWallEndpoint(handle.wallUid, handle.endpoint, finalPt.x, finalPt.z);
+
+        } else if (handle.type === 'line') {
+          // redistribuir todos los items del grupo entre el pivote y el nuevo punto
+          const pt = e.altKey ? raw : snapLineEnd(new THREE.Vector3(handle.pivotX, 0, handle.pivotZ), raw, false);
+          threeRef.current.redistributeLineGroup(handle.groupId, handle.pivotX, handle.pivotZ, pt.x, pt.z);
+        }
         return;
       }
       if (wallToolActiveRef.current) {
@@ -1085,6 +1097,22 @@ export default function BoothPlannerV2() {
         if (w.uid !== uid) return w;
         return endpoint === 'start' ? { ...w, x1: x, z1: z } : { ...w, x2: x, z2: z };
       })),
+      redistributeLineGroup: (groupId, pivotX, pivotZ, endX, endZ) => {
+        setItems((prev) => {
+          const groupItems = prev.filter((it) => it.groupId === groupId);
+          if (groupItems.length < 2) return prev;
+          const n = groupItems.length;
+          const angle = Math.atan2(endX - pivotX, endZ - pivotZ);
+          return prev.map((it) => {
+            if (it.groupId !== groupId) return it;
+            const idx = groupItems.indexOf(it);
+            const t = n === 1 ? 0 : idx / (n - 1);
+            const x = pivotX + (endX - pivotX) * t;
+            const z = pivotZ + (endZ - pivotZ) * t;
+            return { ...it, x, z, rotY: angle, pivotX, pivotZ };
+          });
+        });
+      },
       clearWallGhost: () => {
         const wg = threeRef.current.wallGhost;
         if (wg) { threeRef.current.scene.remove(wg); threeRef.current.wallGhost = null; }
@@ -1155,30 +1183,62 @@ export default function BoothPlannerV2() {
     return () => { scene.remove(mesh); mat.dispose(); geo.dispose(); };
   }, [floorPlan]);
 
-  // ===================== Sync wall handles =====================
+  // ===================== Sync wall handles + line group handles =====================
   useEffect(() => {
     const { handleGroup } = threeRef.current;
     if (!handleGroup) return;
-    // limpiar handles anteriores
     while (handleGroup.children.length) handleGroup.children.pop();
-    if (!selectedWallUid) return;
-    const wall = walls.find((w) => w.uid === selectedWallUid);
-    if (!wall) return;
-    const makeHandle = (x, z, endpoint) => {
-      const geo = new THREE.SphereGeometry(0.12, 16, 16);
-      const mat = new THREE.MeshBasicMaterial({ color: 0xff6a00, depthTest: false });
-      const sphere = new THREE.Mesh(geo, mat);
-      sphere.position.set(x, 0.15, z);
-      sphere.renderOrder = 999;
-      sphere.userData.isWallHandle = true;
-      sphere.userData.wallUid = selectedWallUid;
-      sphere.userData.endpoint = endpoint;
-      sphere.raycast = THREE.Mesh.prototype.raycast; // asegurar que sea clickeable
-      return sphere;
-    };
-    handleGroup.add(makeHandle(wall.x1, wall.z1, 'start'));
-    handleGroup.add(makeHandle(wall.x2, wall.z2, 'end'));
-  }, [selectedWallUid, walls]);
+
+    // Wall handles
+    if (selectedWallUid) {
+      const wall = walls.find((w) => w.uid === selectedWallUid);
+      if (wall) {
+        const makeWallHandle = (x, z, endpoint) => {
+          const geo = new THREE.SphereGeometry(0.12, 16, 16);
+          const mat = new THREE.MeshBasicMaterial({ color: 0xff6a00, depthTest: false });
+          const sphere = new THREE.Mesh(geo, mat);
+          sphere.position.set(x, 0.15, z);
+          sphere.renderOrder = 999;
+          sphere.userData.isWallHandle = true;
+          sphere.userData.wallUid = selectedWallUid;
+          sphere.userData.endpoint = endpoint;
+          return sphere;
+        };
+        handleGroup.add(makeWallHandle(wall.x1, wall.z1, 'start'));
+        handleGroup.add(makeWallHandle(wall.x2, wall.z2, 'end'));
+      }
+    }
+
+    // Line group handles — cuando hay grupo completo seleccionado
+    if (selectedUids.length > 1) {
+      const selItems = items.filter((it) => selectedUids.includes(it.uid));
+      const allSameGroup = selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
+      if (allSameGroup && selItems[0].pivotX != null) {
+        // ordenar por posición para encontrar el primer y último punto
+        const sorted = [...selItems].sort((a, b) => {
+          const da = Math.hypot(a.x - selItems[0].pivotX, a.z - (selItems[0].pivotZ ?? 0));
+          const db = Math.hypot(b.x - selItems[0].pivotX, b.z - (selItems[0].pivotZ ?? 0));
+          return da - db;
+        });
+        const first = sorted[0], last = sorted[sorted.length - 1];
+        const makeLineHandle = (x, z, role) => {
+          const geo = new THREE.SphereGeometry(0.14, 16, 16);
+          const mat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false });
+          const sphere = new THREE.Mesh(geo, mat);
+          sphere.position.set(x, 0.2, z);
+          sphere.renderOrder = 999;
+          sphere.userData.isLineHandle = true;
+          sphere.userData.groupId = selItems[0].groupId;
+          sphere.userData.role = role; // 'start' | 'end'
+          sphere.userData.pivotX = selItems[0].pivotX;
+          sphere.userData.pivotZ = selItems[0].pivotZ ?? 0;
+          return sphere;
+        };
+        handleGroup.add(makeLineHandle(first.x, first.z, 'start'));
+        handleGroup.add(makeLineHandle(last.x, last.z, 'end'));
+      }
+    }
+  }, [selectedWallUid, selectedUids, walls, items]);
 
   // ===================== Sync walls -> meshes =====================
   useEffect(() => {
@@ -2015,61 +2075,138 @@ export default function BoothPlannerV2() {
         unit={unit} UNITS={UNITS} toMeters={toMeters} fmt={fmt} metersTo={metersTo}
       />
     )}
-    <div style={{ display: "flex", height: "100vh", width: "100%", background: "#13151a", color: "#eee", fontFamily: "Inter, system-ui, sans-serif" }}>
-      {/* Sidebar */}
-      <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderRight: "1px solid #2a2d34" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 2 }}>
-          <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Booth Planner</h2>
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100%", background: "#0d0f18", color: "#e2e8f0", fontFamily: "Inter, system-ui, sans-serif" }}>
+
+      {/* ===== TOP HEADER ===== */}
+      <header style={{ height: 52, minHeight: 52, background: "#0d0f18", borderBottom: "1px solid #1e2035", display: "flex", alignItems: "center", padding: "0 16px", gap: 12, zIndex: 50, flexShrink: 0 }}>
+
+        {/* Logo + app name */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginRight: 4, flexShrink: 0 }}>
+          <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #5b4bff 0%, #7c6dff 100%)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <svg width="17" height="17" viewBox="0 0 16 16" fill="none"><rect x="2" y="6" width="12" height="8" rx="1" fill="white" fillOpacity="0.92"/><path d="M1 6L8 2L15 6" stroke="white" strokeWidth="1.5" strokeLinejoin="round"/><rect x="6" y="9" width="4" height="5" rx="0.5" fill="#5b4bff"/></svg>
+          </div>
+          <span style={{ fontSize: 14, fontWeight: 700, color: "#fff", letterSpacing: "-0.01em" }}>Booth Planner</span>
+        </div>
+
+        {/* Divider */}
+        <div style={{ width: 1, height: 20, background: "#1e2035", flexShrink: 0 }} />
+
+        {/* Project name (editable) — centrado */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, justifyContent: "center" }}>
+          {editingName ? (
+            <input
+              autoFocus
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              onBlur={() => setEditingName(false)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") setEditingName(false); }}
+              style={{ background: "#13162a", border: "1px solid #5b4bff", borderRadius: 8, color: "#fff", padding: "4px 10px", fontSize: 14, fontWeight: 600, width: 220, textAlign: "center" }}
+            />
+          ) : (
+            <button onClick={() => setEditingName(true)}
+              style={{ background: "none", border: "none", color: "#e2e8f0", fontSize: 14, fontWeight: 600, cursor: "text", padding: "4px 8px", borderRadius: 8, display: "flex", alignItems: "center", gap: 6, letterSpacing: "-0.01em" }}>
+              {projectName}
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ opacity: 0.4 }}><path d="M8.5 1.5L10.5 3.5L4 10H2V8L8.5 1.5Z" stroke="currentColor" strokeWidth="1.2"/></svg>
+            </button>
+          )}
+          {/* Save status */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, background: "#13162a", border: "1px solid #1e2035", borderRadius: 20, padding: "3px 10px" }}>
+            <div style={{ width: 6, height: 6, borderRadius: "50%", background: saveStatus === "saved" ? "#4ade80" : "#ef4444", flexShrink: 0 }} />
+            <span style={{ fontSize: 11, color: saveStatus === "saved" ? "#4ade80" : "#ef4444", fontWeight: 500 }}>{saveStatus === "saved" ? "Saved" : "Not saved"}</span>
+          </div>
+          {manifestStatus && manifestStatus.type !== "ok" && (
+            <span style={{ fontSize: 10, color: manifestStatus.type === "error" ? "#ff8a65" : "#94a3b8" }}>
+              {manifestStatus.message}
+            </span>
+          )}
+        </div>
+
+        {/* Right controls */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          {/* Undo / Redo */}
+          <div style={{ display: "flex", gap: 2, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, padding: 3 }}>
+            <button title="Undo (Ctrl+Z)" onClick={() => {
+              if (historyIndexRef.current > 0) {
+                historyIndexRef.current--;
+                const snap = historyRef.current[historyIndexRef.current];
+                skipHistoryRef.current = true;
+                setItems(snap.items); setWalls(snap.walls);
+                setSelectedUids([]); setSelectedWallUid(null);
+                setTimeout(() => { skipHistoryRef.current = false; }, 50);
+              }
+            }} style={{ ...iconBtnStyle, background: "none", border: "none", width: 28, height: 28, opacity: historyIndexRef.current > 0 ? 1 : 0.3 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 10h10a6 6 0 0 1 0 12H7"/><path d="M3 10L7 6M3 10l4 4"/></svg>
+            </button>
+            <button title="Redo (Ctrl+Y)" onClick={() => {
+              if (historyIndexRef.current < historyRef.current.length - 1) {
+                historyIndexRef.current++;
+                const snap = historyRef.current[historyIndexRef.current];
+                skipHistoryRef.current = true;
+                setItems(snap.items); setWalls(snap.walls);
+                setSelectedUids([]); setSelectedWallUid(null);
+                setTimeout(() => { skipHistoryRef.current = false; }, 50);
+              }
+            }} style={{ ...iconBtnStyle, background: "none", border: "none", width: 28, height: 28, opacity: historyIndexRef.current < historyRef.current.length - 1 ? 1 : 0.3 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10H11a6 6 0 0 0 0 12h6"/><path d="M21 10l-4-4m4 4l-4 4"/></svg>
+            </button>
+          </div>
+
+          {/* Divider */}
+          <div style={{ width: 1, height: 20, background: "#1e2035" }} />
+
+          {/* Save */}
+          <button onClick={saveProject} title="Save (Ctrl+S)"
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#e2e8f0", padding: "6px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500, letterSpacing: "0.01em" }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17,21 17,13 7,13 7,21"/><polyline points="7,3 7,8 15,8"/></svg>
+            Save
+          </button>
+
+          {/* File menu */}
           <div style={{ position: "relative" }}>
             <button onClick={() => setShowFileMenu((v) => !v)}
-              style={{ ...btnStyle, padding: "4px 10px", fontSize: 12, background: showFileMenu ? "#c4622d" : "#33363d" }}>
-              File ▾
+              style={{ display: "flex", alignItems: "center", gap: 5, background: showFileMenu ? "#1e2035" : "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#e2e8f0", padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+              File
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ opacity: 0.6 }}><polyline points="6,9 12,15 18,9"/></svg>
             </button>
             {showFileMenu && (
-              <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, background: "#22242a", border: "1px solid #33363d", borderRadius: 8, overflow: "hidden", zIndex: 100, minWidth: 180 }}
+              <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", zIndex: 200, minWidth: 200, boxShadow: "0 12px 32px rgba(0,0,0,0.5)" }}
                 onMouseLeave={() => setShowFileMenu(false)}>
-                <button onClick={newProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
-                  🆕 New Project
-                </button>
-                <div style={{ height: 1, background: "#33363d" }} />
-                <button onClick={saveProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
-                  💾 Save <span style={{ color: "#666", fontSize: 11 }}>Ctrl+S</span>
-                </button>
-                <button onClick={saveProjectAs} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
-                  💾 Save As…
-                </button>
-                <button onClick={loadProject} style={{ display: "block", width: "100%", padding: "10px 14px", fontSize: 12, background: "none", border: "none", color: "#eee", cursor: "pointer", textAlign: "left" }}>
-                  📂 Load Project
-                </button>
+                {[
+                  { label: "New Project", icon: "🆕", action: newProject },
+                  null,
+                  { label: "Save", icon: "💾", hint: "Ctrl+S", action: saveProject },
+                  { label: "Save As…", icon: "💾", action: saveProjectAs },
+                  { label: "Load Project", icon: "📂", action: loadProject },
+                  null,
+                  { label: "Reload Library", icon: "🔄", action: () => { loadManifest(); setShowFileMenu(false); } },
+                ].map((item, i) => item === null
+                  ? <div key={i} style={{ height: 1, background: "#1e2035", margin: "2px 0" }} />
+                  : <button key={i} onClick={item.action}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", padding: "9px 14px", fontSize: 12, background: "none", border: "none", color: "#e2e8f0", cursor: "pointer", textAlign: "left", gap: 8 }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 13 }}>{item.icon}</span>
+                        {item.label}
+                      </span>
+                      {item.hint && <span style={{ color: "#4a5068", fontSize: 10 }}>{item.hint}</span>}
+                    </button>
+                )}
               </div>
             )}
           </div>
-        </div>
-        <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={projectName}>
-          {projectName}
-        </div>
-        {saveStatus === "saved" && (
-          <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 4 }}>✓ Project saved</div>
-        )}
-        <p style={{ fontSize: 12, color: "#888", marginBottom: 14 }}>v2 · procedural + cameras + render</p>
 
-        <Section title="Library (GitHub)">
-          <input
-            placeholder="manifest.json URL"
-            value={manifestUrl}
-            onChange={(e) => setManifestUrl(e.target.value)}
-            style={inputStyle}
-          />
-          <button onClick={loadManifest} style={{ ...btnStyle, marginTop: 6 }}>Load library</button>
-          {manifestStatus && (
-            <div style={{
-              fontSize: 11, marginTop: 6,
-              color: manifestStatus.type === "error" ? "#ff8a65" : manifestStatus.type === "ok" ? "#9ad6b4" : "#999",
-            }}>
-              {manifestStatus.message}
-            </div>
-          )}
-        </Section>
+          {/* Export */}
+          <button onClick={captureRender}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "linear-gradient(135deg, #5b4bff 0%, #7c6dff 100%)", border: "none", borderRadius: 8, color: "#fff", padding: "6px 16px", fontSize: 12, cursor: "pointer", fontWeight: 600, letterSpacing: "0.01em" }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="8,17 12,21 16,17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>
+            Export
+          </button>
+        </div>
+      </header>
+
+      {/* ===== MAIN CONTENT ===== */}
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+      {/* Sidebar */}
+      <div style={{ width: 300, minWidth: 300, maxWidth: 300, flexShrink: 0, background: "#0d1117", overflowY: "auto", borderRight: "1px solid #1e2035" }}>
 
         <Section title="Units">
           <div style={{ display: "flex", gap: 4 }}>
@@ -2548,7 +2685,8 @@ export default function BoothPlannerV2() {
           </div>
         )}
       </div>
-    </div>
+      </div>{/* end main content */}
+    </div>{/* end root */}
     </>
   );
 }
@@ -2748,9 +2886,10 @@ function Section({ title, children }) {
   );
 }
 
-const inputStyle = { flex: 1, background: "#22242a", border: "1px solid #33363d", borderRadius: 6, color: "#fff", padding: "6px 8px", fontSize: 12, width: "100%" };
-const btnStyle = { flex: 1, background: "#33363d", border: "none", borderRadius: 6, color: "#fff", padding: "6px 0", fontSize: 12, cursor: "pointer" };
-const labelStyle = { fontSize: 11, color: "#999", display: "block", marginBottom: 4 };
+const inputStyle = { flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#e2e8f0", padding: "6px 10px", fontSize: 12, width: "100%" };
+const btnStyle = { flex: 1, background: "#1e2035", border: "none", borderRadius: 8, color: "#e2e8f0", padding: "6px 0", fontSize: 12, cursor: "pointer" };
+const labelStyle = { fontSize: 11, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 };
+const iconBtnStyle = { display: "flex", alignItems: "center", justifyContent: "center", width: 30, height: 30, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#e2e8f0", cursor: "pointer" };
 const catalogCard = { display: "flex", alignItems: "center", gap: 10, background: "#22242a", border: "1px solid #33363d", borderRadius: 8, padding: "8px 10px", cursor: "grab" };
 const countBadgeStyle = { flexShrink: 0, background: "#c4622d", color: "#fff", fontSize: 11, fontWeight: 700, borderRadius: 10, padding: "2px 7px", minWidth: 18, textAlign: "center" };
 const pillStyle = (active) => ({
