@@ -349,7 +349,6 @@ function generateThumbnail(scene3DObject, color) {
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
       renderer.setSize(SIZE, SIZE);
       renderer.setPixelRatio(2);
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.2;
       renderer.shadowMap.enabled = true;
@@ -2632,32 +2631,45 @@ export default function BoothPlannerV2() {
 
       {/* Right panel: selected item properties */}
       {/* Right panel — always visible, empty state when nothing is selected */}
-      <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#1b1d22", padding: 16, overflowY: "auto", borderLeft: "1px solid #2a2d34" }}>
+      <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#0d1117", padding: 16, overflowY: "auto", borderLeft: "1px solid #1e2035" }}>
         {selectedWallUid && !selectedItem ? (() => {
           const selWall = walls.find((w) => w.uid === selectedWallUid);
           if (!selWall) return null;
           return (
             <>
-              <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Wall</h3>
-              <label style={labelStyle}>Height ({UNITS[unit].label})</label>
-              <input type="number" min="0.1" step="0.1" value={fmt(metersTo(selWall.height, unit))}
-                onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, height: toMeters(parseFloat(e.target.value) || 0, unit) } : w))}
-                style={{ ...inputStyle, marginBottom: 8 }} />
-              <label style={labelStyle}>Glass ratio</label>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <input type="range" min="0" max="1" step="0.05" value={selWall.glassRatio}
-                  onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, glassRatio: parseFloat(e.target.value) } : w))}
-                  style={{ flex: 1 }} />
-                <span style={{ fontSize: 11, color: "#999", width: 32 }}>{Math.round(selWall.glassRatio * 100)}%</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                <div style={{ width: 3, height: 20, background: "#5b4bff", borderRadius: 2 }} />
+                <h3 style={{ fontSize: 14, fontWeight: 700, margin: 0, color: "#e2e8f0" }}>Wall Properties</h3>
               </div>
-              <label style={labelStyle}>Color</label>
-              <input type="color" value={selWall.color}
-                onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, color: e.target.value } : w))}
-                style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 12 }} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Height ({UNITS[unit].label})</label>
+                  <input type="number" min="0.1" step="0.1" value={fmt(metersTo(selWall.height, unit))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, height: toMeters(parseFloat(e.target.value) || 0, unit) } : w))}
+                    style={inputStyle} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Thickness ({UNITS[unit].label})</label>
+                  <input type="number" min="0.02" step="0.02" value={fmt(metersTo(selWall.thickness || 0.1, unit))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, thickness: toMeters(parseFloat(e.target.value) || 0.1, unit) } : w))}
+                    style={inputStyle} />
+                </div>
+              </div>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Glass — {Math.round(selWall.glassRatio * 100)}%</label>
+              <input type="range" min="0" max="1" step="0.05" value={selWall.glassRatio}
+                onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, glassRatio: parseFloat(e.target.value) } : w))}
+                style={{ width: "100%", accentColor: "#5b4bff", marginBottom: 12 }} />
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Color</label>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+                <input type="color" value={selWall.color}
+                  onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, color: e.target.value } : w))}
+                  style={{ width: 36, height: 36, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
+                <div style={{ flex: 1, height: 36, background: selWall.color, borderRadius: 8, border: "1px solid #1e2035" }} />
+              </div>
               <button
                 onClick={() => { setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid)); setSelectedWallUid(null); }}
-                style={{ ...btnStyle, background: "#5a2424", width: "100%" }}>
-                Delete wall
+                style={{ width: "100%", background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
+                Delete Wall
               </button>
             </>
           );
@@ -2859,6 +2871,52 @@ export default function BoothPlannerV2() {
         )}
       </div>
       </div>{/* end main content */}
+
+      {/* ===== BOTTOM BAR — Scene summary ===== */}
+      <div style={{ height: 52, minHeight: 52, background: "#0d1117", borderTop: "1px solid #1e2035", display: "flex", alignItems: "center", padding: "0 16px", gap: 8, flexShrink: 0, overflowX: "auto" }}>
+        <span style={{ fontSize: 11, color: "#334155", fontWeight: 600, whiteSpace: "nowrap", marginRight: 4 }}>In scene:</span>
+
+        {/* Model chips — one per catalogId that has items */}
+        {Object.entries(itemCounts).filter(([, count]) => count > 0).map(([catalogId, count]) => {
+          const def = findDef(
+            items.find((it) => it.catalogId === catalogId)?.kind || "model",
+            catalogId
+          );
+          if (!def) return null;
+          const thumb = thumbnails[catalogId];
+          const color = catalogColors[catalogId] || def.color || "#1e2035";
+          return (
+            <div key={catalogId} style={{ display: "flex", alignItems: "center", gap: 6, background: "#13162a", border: "1px solid #1e2035", borderRadius: 20, padding: "4px 10px 4px 4px", flexShrink: 0 }}>
+              {/* Mini thumbnail */}
+              <div style={{ width: 28, height: 28, borderRadius: 14, overflow: "hidden", flexShrink: 0, background: color }}>
+                {thumb
+                  ? <img src={thumb} alt={def.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <span style={{ fontSize: 9, color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>{def.name.slice(0, 2).toUpperCase()}</span>
+                    </div>
+                }
+              </div>
+              <span style={{ fontSize: 11, color: "#e2e8f0", fontWeight: 500, whiteSpace: "nowrap" }}>{def.name}</span>
+              <span style={{ background: "#5b4bff", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 7px", minWidth: 18, textAlign: "center" }}>{count}</span>
+            </div>
+          );
+        })}
+
+        {/* Walls chip */}
+        {walls.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, background: "#13162a", border: "1px solid #1e2035", borderRadius: 20, padding: "4px 10px 4px 8px", flexShrink: 0 }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>
+            <span style={{ fontSize: 11, color: "#e2e8f0", fontWeight: 500 }}>Walls</span>
+            <span style={{ background: "#5b4bff", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 7px" }}>{walls.length}</span>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {Object.values(itemCounts).every((v) => !v) && walls.length === 0 && (
+          <span style={{ fontSize: 11, color: "#1e2a3a", fontStyle: "italic" }}>No objects placed yet</span>
+        )}
+      </div>
+
     </div>{/* end root */}
     </>
   );
