@@ -342,6 +342,55 @@ function varyColor(hexColor, index) {
   return `#${c.getHexString()}`;
 }
 
+function generateThumbnail(scene3DObject, color) {
+  return new Promise((resolve) => {
+    try {
+      const SIZE = 128;
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+      renderer.setSize(SIZE, SIZE);
+      renderer.setPixelRatio(2);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.2;
+      renderer.shadowMap.enabled = true;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x13162a);
+
+      // Lights
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const key = new THREE.DirectionalLight(0xffffff, 2.0);
+      key.position.set(3, 5, 3);
+      scene.add(key);
+      const fill = new THREE.DirectionalLight(0xbbd4ff, 0.5);
+      fill.position.set(-3, 2, -2);
+      scene.add(fill);
+
+      // Clone and add object
+      const obj = scene3DObject.clone(true);
+      scene.add(obj);
+
+      // Fit camera to object
+      const box = new THREE.Box3().setFromObject(obj);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z) || 1;
+
+      const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 1000);
+      const dist = maxDim * 2.2;
+      camera.position.set(center.x + dist * 0.7, center.y + dist * 0.6, center.z + dist * 0.7);
+      camera.lookAt(center);
+
+      renderer.render(scene, camera);
+      const dataURL = renderer.domElement.toDataURL("image/png");
+      renderer.dispose();
+      resolve(dataURL);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
 export default function BoothPlannerV2() {
   const mountRef = useRef(null);
   const threeRef = useRef({});
@@ -351,6 +400,7 @@ export default function BoothPlannerV2() {
   const [showFileMenu, setShowFileMenu] = useState(false);
   const [saveStatus, setSaveStatus] = useState(null);
   const [editingName, setEditingName] = useState(false);
+  const [showCameraPanel, setShowCameraPanel] = useState(false);
   const [projectName, setProjectName] = useState("Untitled Layout");
   const [showSaveModal, setShowSaveModal] = useState(false); // "saved" | null
   const historyRef = useRef([]);
@@ -437,6 +487,7 @@ export default function BoothPlannerV2() {
   // ---------------- Load manifest from GitHub (or any URL) ----------------
   const [manifestStatus, setManifestStatus] = useState(null); // {type:'ok'|'error'|'loading', message}
   const [libraryReady, setLibraryReady] = useState(false);
+  const [thumbnails, setThumbnails] = useState({}); // { catalogId: dataURL }
   const loadManifest = useCallback(async () => {
     setLibraryReady(false);
     if (!manifestUrl) { setCatalog(DEFAULT_MANIFEST); setManifestStatus(null); setLibraryReady(true); return; }
@@ -468,6 +519,20 @@ export default function BoothPlannerV2() {
       ));
 
       setManifestStatus({ type: "ok", message: `✓ ${data.length} models loaded` });
+
+      // Generar thumbnails en background — uno por uno para no saturar la GPU
+      const modelsForThumb = data.filter((d) => d.file && d.category !== "Props");
+      (async () => {
+        for (const def of modelsForThumb) {
+          try {
+            const scene = await loadModelOnce(def.file);
+            const dataURL = await generateThumbnail(scene, def.color);
+            if (dataURL) {
+              setThumbnails((prev) => ({ ...prev, [def.id]: dataURL }));
+            }
+          } catch (e) { /* silently skip */ }
+        }
+      })();
     } catch (err) {
       console.error("Could not load the manifest, using local catalog:", err);
       setManifestStatus({ type: "error", message: `✗ ${err.message || "Unknown error while loading"}` });
@@ -2109,11 +2174,6 @@ export default function BoothPlannerV2() {
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ opacity: 0.4 }}><path d="M8.5 1.5L10.5 3.5L4 10H2V8L8.5 1.5Z" stroke="currentColor" strokeWidth="1.2"/></svg>
             </button>
           )}
-          {/* Save status */}
-          <div style={{ display: "flex", alignItems: "center", gap: 5, background: "#13162a", border: "1px solid #1e2035", borderRadius: 20, padding: "3px 10px" }}>
-            <div style={{ width: 6, height: 6, borderRadius: "50%", background: saveStatus === "saved" ? "#4ade80" : "#ef4444", flexShrink: 0 }} />
-            <span style={{ fontSize: 11, color: saveStatus === "saved" ? "#4ade80" : "#ef4444", fontWeight: 500 }}>{saveStatus === "saved" ? "Saved" : "Not saved"}</span>
-          </div>
           {manifestStatus && manifestStatus.type !== "ok" && (
             <span style={{ fontSize: 10, color: manifestStatus.type === "error" ? "#ff8a65" : "#94a3b8" }}>
               {manifestStatus.message}
@@ -2156,9 +2216,12 @@ export default function BoothPlannerV2() {
 
           {/* Save */}
           <button onClick={saveProject} title="Save (Ctrl+S)"
-            style={{ display: "flex", alignItems: "center", gap: 6, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#e2e8f0", padding: "6px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500, letterSpacing: "0.01em" }}>
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#e2e8f0", padding: "6px 14px", fontSize: 12, cursor: "pointer", fontWeight: 500, letterSpacing: "0.01em", position: "relative" }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17,21 17,13 7,13 7,21"/><polyline points="7,3 7,8 15,8"/></svg>
             Save
+            {saveStatus === "saved" && (
+              <span style={{ position: "absolute", top: 6, right: 6, width: 5, height: 5, borderRadius: "50%", background: "#4ade80" }} />
+            )}
           </button>
 
           {/* File menu */}
@@ -2208,219 +2271,329 @@ export default function BoothPlannerV2() {
       {/* Sidebar */}
       <div style={{ width: 300, minWidth: 300, maxWidth: 300, flexShrink: 0, background: "#0d1117", overflowY: "auto", borderRight: "1px solid #1e2035" }}>
 
-        <Section title="Units">
-          <div style={{ display: "flex", gap: 4 }}>
-            {Object.keys(UNITS).map((u) => (
-              <button key={u} onClick={() => setUnit(u)} style={pillStyle(unit === u)}>{UNITS[u].label}</button>
-            ))}
-          </div>
-        </Section>
+      {/* ===== SIDEBAR CONTENT ===== */}
 
-        <Section title={`Floor (${UNITS[unit].label})`}>
-          <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-            <input type="number" min="0.5" step="0.1" value={fmt(metersTo(floorW, unit))}
-              onChange={(e) => setFloorW(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} />
-            <span style={{ alignSelf: "center", color: "#666" }}>×</span>
-            <input type="number" min="0.5" step="0.1" value={fmt(metersTo(floorD, unit))}
-              onChange={(e) => setFloorD(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} />
+        {/* Project Setup */}
+        <Section title="Project Setup">
+
+          {/* Units */}
+          <div style={{ marginBottom: 16 }}>
+            <label style={labelStyle}>Units</label>
+            <div style={{ display: "flex", gap: 6 }}>
+              {Object.keys(UNITS).map((u) => (
+                <button key={u} onClick={() => setUnit(u)} style={{
+                  flex: 1, padding: "7px 0", fontSize: 12, fontWeight: 600, borderRadius: 8,
+                  border: "1px solid " + (unit === u ? "#5b4bff" : "#1e2035"),
+                  background: unit === u ? "#5b4bff" : "#13162a",
+                  color: unit === u ? "#fff" : "#94a3b8", cursor: "pointer",
+                }}>{UNITS[u].label}</button>
+              ))}
+            </div>
           </div>
-          <label style={labelStyle}>Floor color</label>
-          <input type="color" value={floorColor} onChange={(e) => setFloorColor(e.target.value)}
-            style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 8 }} />
-          <button onClick={handleLoadFloorPlan} style={{ ...btnStyle, width: "100%", marginBottom: floorPlan ? 8 : 0 }}>
-            🗺 {floorPlan ? "Replace floor plan" : "Load floor plan"}
+
+          {/* Floor & Dimensions */}
+          <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "12px", marginBottom: 12 }}>
+            <label style={{ ...labelStyle, marginBottom: 10 }}>Floor & Dimensions</label>
+            <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Width ({UNITS[unit].label})</label>
+                <input type="number" min="0.5" step="0.1" value={fmt(metersTo(floorW, unit))}
+                  onChange={(e) => setFloorW(toMeters(parseFloat(e.target.value) || 0, unit))}
+                  style={{ ...inputStyle, background: "#0d1117" }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Depth ({UNITS[unit].label})</label>
+                <input type="number" min="0.5" step="0.1" value={fmt(metersTo(floorD, unit))}
+                  onChange={(e) => setFloorD(toMeters(parseFloat(e.target.value) || 0, unit))}
+                  style={{ ...inputStyle, background: "#0d1117" }} />
+              </div>
+            </div>
+            <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 6 }}>Floor Color</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input type="color" value={floorColor} onChange={(e) => setFloorColor(e.target.value)}
+                style={{ width: 36, height: 36, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
+              <div style={{ flex: 1, background: floorColor, height: 36, borderRadius: 8, border: "1px solid #1e2035" }} />
+            </div>
+          </div>
+
+          {/* Floor Plan */}
+          <button onClick={handleLoadFloorPlan} style={{
+            width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: "#13162a", border: "1px dashed #2a3050", borderRadius: 10, color: "#94a3b8",
+            padding: "11px", fontSize: 12, cursor: "pointer", fontWeight: 500, marginBottom: floorPlan ? 10 : 0
+          }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            {floorPlan ? "Replace floor plan" : "Upload Floor Plan"}
           </button>
+
           {floorPlan && (
-            <>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+            <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6, color: "#e2e8f0", cursor: "pointer" }}>
                   <input type="checkbox" checked={floorPlan.visible !== false}
                     onChange={(e) => setFloorPlan((f) => ({ ...f, visible: e.target.checked }))} />
                   Show floor plan
                 </label>
-                <button onClick={() => setFloorPlan(null)} style={{ ...btnStyle, background: "#5a2424", padding: "4px 8px", fontSize: 11 }}>Remove</button>
+                <button onClick={() => setFloorPlan(null)} style={{ background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 6, color: "#f87171", padding: "3px 8px", fontSize: 11, cursor: "pointer" }}>Remove</button>
               </div>
-              <label style={labelStyle}>Opacity</label>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Opacity</label>
               <input type="range" min="0.05" max="1" step="0.05" value={floorPlan.opacity ?? 0.5}
                 onChange={(e) => setFloorPlan((f) => ({ ...f, opacity: parseFloat(e.target.value) }))}
-                style={{ width: "100%", marginBottom: 6 }} />
-              <label style={labelStyle}>Position ({UNITS[unit].label})</label>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input type="number" step="0.1" value={fmt(metersTo(floorPlan.x ?? 0, unit))}
-                  onChange={(e) => setFloorPlan((f) => ({ ...f, x: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={inputStyle} placeholder="x" />
-                <input type="number" step="0.1" value={fmt(metersTo(floorPlan.z ?? 0, unit))}
-                  onChange={(e) => setFloorPlan((f) => ({ ...f, z: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={inputStyle} placeholder="z" />
+                style={{ width: "100%", accentColor: "#5b4bff", marginBottom: 10 }} />
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 6 }}>Position ({UNITS[unit].label})</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 9, color: "#475569", display: "block", marginBottom: 3 }}>X</label>
+                  <input type="number" step="0.1" value={fmt(metersTo(floorPlan.x ?? 0, unit))}
+                    onChange={(e) => setFloorPlan((f) => ({ ...f, x: toMeters(parseFloat(e.target.value) || 0, unit) }))}
+                    style={{ ...inputStyle, background: "#0d1117" }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 9, color: "#475569", display: "block", marginBottom: 3 }}>Z</label>
+                  <input type="number" step="0.1" value={fmt(metersTo(floorPlan.z ?? 0, unit))}
+                    onChange={(e) => setFloorPlan((f) => ({ ...f, z: toMeters(parseFloat(e.target.value) || 0, unit) }))}
+                    style={{ ...inputStyle, background: "#0d1117" }} />
+                </div>
               </div>
-            </>
+            </div>
           )}
         </Section>
 
-        {/* Dynamic categories from manifest — exclude Props (they go in Props section) */}
+        {/* Dynamic categories from manifest — exclude Props */}
         {Array.from(new Set(catalog.filter((c) => c.category !== "Props").map((c) => c.category || "Models"))).map((cat) => {
           const catItems = catalog.filter((c) => (c.category || "Models") === cat && c.category !== "Props");
           const catCount = items.filter((it) => it.kind === "model" && catItems.some((c) => c.id === it.catalogId)).length;
           return (
-            <Section key={cat} title={`${cat}: ${catCount}`}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {catItems.map((c) => (
-                  <div key={c.id} style={{ ...catalogCard, opacity: libraryReady ? 1 : 0.4, pointerEvents: libraryReady ? "auto" : "none" }}>
-                    <div draggable={libraryReady} onDragStart={() => setDragCatalog({ def: c, kind: "model" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: libraryReady ? "grab" : "default" }}>
-                      <input type="color" value={getCatalogColor(c)}
-                        onChange={(e) => { e.stopPropagation(); setCatalogColor(c.id, e.target.value); }}
-                        onClick={(e) => e.stopPropagation()}
-                        title="Click to change color for this model"
-                        style={{ width: 28, height: 28, borderRadius: 4, border: "1px solid rgba(255,255,255,0.2)", padding: 2, cursor: "pointer", flexShrink: 0, background: "none" }}
-                      />
-                      <div style={{ fontSize: 12 }}>
-                        <div>{c.name}</div>
-                        <div style={{ color: "#777", fontSize: 11 }}>
-                          {fmt(metersTo(c.w, unit))}×{fmt(metersTo(c.d, unit))} {UNITS[unit].label} · h {fmt(metersTo(c.h, unit))}{UNITS[unit].label}
+            <Section key={cat} title={cat} badge={catCount > 0 ? catCount : null}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {catItems.map((c) => {
+                  const thumb = thumbnails[c.id];
+                  const count = itemCounts[c.id] || 0;
+                  return (
+                    <div key={c.id} style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", opacity: libraryReady ? 1 : 0.5, pointerEvents: libraryReady ? "auto" : "none" }}>
+                      <div style={{ display: "flex", alignItems: "stretch", gap: 0 }}>
+
+                        {/* Thumbnail — área draggable con hover "Drag" */}
+                        <ModelDragArea
+                          def={c} kind="model" libraryReady={libraryReady}
+                          thumb={thumb} color={getCatalogColor(c)}
+                          onDragStart={() => setDragCatalog({ def: c, kind: "model" })}
+                        />
+
+                        {/* Info + controls */}
+                        <div style={{ flex: 1, padding: "8px 10px", display: "flex", flexDirection: "column", justifyContent: "center", minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                            <span style={{ fontSize: 12, fontWeight: 600, color: "#e2e8f0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
+                            {count > 0 && <span style={{ background: "#5b4bff", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 6px", flexShrink: 0 }}>{count}</span>}
+                          </div>
+                          <div style={{ fontSize: 10, color: "#475569", marginBottom: 8 }}>
+                            {fmt(metersTo(c.w, unit))}×{fmt(metersTo(c.d, unit))} · h {fmt(metersTo(c.h, unit))} {UNITS[unit].label}
+                          </div>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <input type="color" value={getCatalogColor(c)}
+                              onChange={(e) => { e.stopPropagation(); setCatalogColor(c.id, e.target.value); }}
+                              onClick={(e) => e.stopPropagation()}
+                              title="Color"
+                              style={{ width: 24, height: 24, borderRadius: 6, border: "1px solid #2a3050", padding: 1, cursor: "pointer", flexShrink: 0, background: "none" }}
+                            />
+                            <button disabled={!libraryReady} onClick={() => setPendingLineDef({ def: c, kind: "model" })}
+                              style={{ flex: 1, background: "#5b4bff", border: "none", borderRadius: 6, color: "#fff", padding: "5px 0", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+                              Array
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
-                    {!!itemCounts[c.id] && <span style={countBadgeStyle}>{itemCounts[c.id]}</span>}
-                    <button disabled={!libraryReady} onClick={() => setPendingLineDef({ def: c, kind: "model" })} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </Section>
           );
         })}
 
-        <Section title={`Primitives in scene: ${items.filter((it) => it.kind === "primitive").length}`}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {PRIMITIVES.map((p) => (
-              <div key={p.id} style={catalogCard}>
-                <div draggable onDragStart={() => setDragCatalog({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "grab" }}>
-                  <div style={{ width: 14, height: 14, borderRadius: 3, background: "#9aa0a6", flexShrink: 0 }} />
-                  <div style={{ fontSize: 12 }}>{p.name}</div>
+        {/* Primitives */}
+        <Section title="Primitives" badge={items.filter((it) => it.kind === "primitive").length || null}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {PRIMITIVES.map((p) => {
+              const PRIM_ICONS = {
+                box: <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>,
+                cylinder: <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="1.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/></svg>,
+                sphere: <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15.3 15.3 0 0 1 4 9 15.3 15.3 0 0 1-4 9 15.3 15.3 0 0 1-4-9 15.3 15.3 0 0 1 4-9z"/></svg>,
+                plane: <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="1.5"><rect x="3" y="9" width="18" height="6" rx="1"/></svg>,
+              };
+              const count = itemCounts[p.id] || 0;
+              return (
+                <div key={p.id} draggable onDragStart={() => setDragCatalog({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" })}
+                  style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 6, cursor: "grab", position: "relative" }}>
+                  {count > 0 && <span style={{ position: "absolute", top: 6, right: 6, background: "#5b4bff", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 5px" }}>{count}</span>}
+                  {PRIM_ICONS[p.kind] || PRIM_ICONS.box}
+                  <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>{p.name}</span>
+                  <button onClick={(e) => { e.stopPropagation(); setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); }}
+                    style={{ width: "100%", background: "#1e2035", border: "none", borderRadius: 6, color: "#94a3b8", padding: "3px 0", fontSize: 10, cursor: "pointer" }}>
+                    Array
+                  </button>
                 </div>
-                {!!itemCounts[p.id] && (
-                  <span style={countBadgeStyle}>{itemCounts[p.id]}</span>
-                )}
-                <button onClick={() => { setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); }} style={{ ...btnStyle, flex: "0 0 auto", padding: "4px 8px", fontSize: 11, whiteSpace: "nowrap" }}>Line</button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </Section>
 
-        <Section title={`Props in scene: ${items.filter((it) => it.kind === "prop").length}`}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {[...PROPS, ...catalog.filter((c) => c.category === "Props")].map((p) => (
-              <div key={p.id} style={catalogCard}>
-                <div draggable onDragStart={() => setDragCatalog({ def: p, kind: "prop" })} style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "grab" }}>
-                  <div style={{ width: 14, height: 14, borderRadius: 3, background: p.color || "#9aa0a6", flexShrink: 0 }} />
-                  <div style={{ fontSize: 12 }}>{p.name}</div>
+        {/* Props & Accessories */}
+        <Section title="Props & Accessories" badge={items.filter((it) => it.kind === "prop").length || null}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            {[...PROPS, ...catalog.filter((c) => c.category === "Props")].map((p) => {
+              const count = itemCounts[p.id] || 0;
+              const thumb = thumbnails[p.id];
+              return (
+                <div key={p.id} draggable onDragStart={() => setDragCatalog({ def: p, kind: "prop" })}
+                  style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", cursor: "grab", position: "relative" }}>
+                  {count > 0 && <span style={{ position: "absolute", top: 4, right: 4, background: "#5b4bff", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 5px", zIndex: 1 }}>{count}</span>}
+                  <div style={{ height: 56, background: thumb ? "transparent" : (p.color || "#1e2035"), display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {thumb
+                      ? <img src={thumb} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      : <span style={{ fontSize: 18 }}>📦</span>
+                    }
+                  </div>
+                  <div style={{ padding: "5px 6px", fontSize: 9, color: "#64748b", fontWeight: 500, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
                 </div>
-                {!!itemCounts[p.id] && (
-                  <span style={countBadgeStyle}>{itemCounts[p.id]}</span>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
-          <div style={{ fontSize: 10, color: "#666", marginTop: 6 }}>
-            Drag them onto another object to attach (they move with it) · onto empty floor to detach
-          </div>
+          <p style={{ fontSize: 10, color: "#334155", marginTop: 8 }}>Drag onto an object to attach · onto floor to detach</p>
         </Section>
 
+        {/* Array mode banner */}
         {pendingLineDef && (
-          <div style={{ background: "#2d6a4f", borderRadius: 8, padding: 10, marginBottom: 16, fontSize: 12 }}>
-            <div style={{ marginBottom: 6 }}>Line mode: <b>{pendingLineDef.def.name}</b></div>
-            <div style={{ color: "#cde8d9", fontSize: 11, marginBottom: 8 }}>
-              Click on the floor = start · move the mouse · scroll = change count ({lineCount}) · ← → = orientation · click again = confirm
+          <div style={{ margin: "0 0 2px 0", background: "linear-gradient(135deg, #1e3a2f, #1a3228)", borderTop: "1px solid #2d6a4f", borderBottom: "1px solid #2d6a4f", padding: "10px 16px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#4ade80" }}>Array: {pendingLineDef.def.name}</div>
+              <button onClick={() => setPendingLineDef(null)} style={{ background: "none", border: "1px solid #2d6a4f", borderRadius: 6, color: "#4ade80", padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>Cancel</button>
             </div>
-            <button onClick={() => setPendingLineDef(null)} style={{ ...btnStyle, background: "#1b1d22" }}>Cancel</button>
+            <div style={{ fontSize: 10, color: "#86efac", lineHeight: 1.5 }}>
+              Click floor = start · Move mouse · <b>Scroll</b> = count ({lineCount}) · <b>← →</b> = rotate · Click again = place
+            </div>
           </div>
         )}
 
-        <Section title="Wall Tool">
-          <button
-            onClick={() => {
-              setWallToolActive((v) => {
-                if (v) {
-                  wallStateRef.current = { active: false, start: null, end: null };
-                  threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
-                }
-                return !v;
-              });
-            }}
-            style={{ ...btnStyle, width: "100%", marginBottom: 8, background: wallToolActive ? "#c4622d" : "#33363d" }}
-          >
-            {wallToolActive ? "⬛ Stop drawing" : "🧱 Draw Wall"}
+        {/* Walls & Structure */}
+        <Section title="Walls & Structure" badge={walls.length || null}>
+          <button onClick={() => {
+            setWallToolActive((v) => {
+              if (v) { wallStateRef.current = { active: false, start: null, end: null }; threeRef.current.clearWallGhost && threeRef.current.clearWallGhost(); }
+              return !v;
+            });
+          }} style={{
+            width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: wallToolActive ? "linear-gradient(135deg, #5b4bff, #7c6dff)" : "#13162a",
+            border: wallToolActive ? "none" : "1px solid #1e2035",
+            borderRadius: 10, color: wallToolActive ? "#fff" : "#94a3b8",
+            padding: "11px", fontSize: 13, cursor: "pointer", fontWeight: 600, marginBottom: 12,
+          }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+            {wallToolActive ? "Stop Drawing" : "Draw Wall"}
           </button>
           {wallToolActive && (
-            <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 8 }}>
-              Click: set start · move · click: place · chain continues · Esc: finish
+            <div style={{ background: "#0f2a1e", border: "1px solid #1a4a30", borderRadius: 8, padding: "8px 10px", marginBottom: 10, fontSize: 10, color: "#86efac", lineHeight: 1.6 }}>
+              Click = set start · Move · Click = place · <b>Shift</b> = free pos · <b>Alt</b> = free angle · <b>Esc</b> = finish
             </div>
           )}
-          <label style={labelStyle}>Height ({UNITS[unit].label})</label>
-          <input type="number" min="0.1" step="0.1" value={fmt(metersTo(wallConfig.height, unit))}
-            onChange={(e) => setWallConfig((c) => ({ ...c, height: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={{ ...inputStyle, marginBottom: 8 }} />
-          <label style={labelStyle}>Glass ratio (0 = solid · 1 = all glass)</label>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-            <input type="range" min="0" max="1" step="0.05" value={wallConfig.glassRatio}
-              onChange={(e) => setWallConfig((c) => ({ ...c, glassRatio: parseFloat(e.target.value) }))}
-              style={{ flex: 1 }} />
-            <span style={{ fontSize: 11, color: "#999", width: 32 }}>{Math.round(wallConfig.glassRatio * 100)}%</span>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+            <div>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Height ({UNITS[unit].label})</label>
+              <input type="number" min="0.1" step="0.1" value={fmt(metersTo(wallConfig.height, unit))}
+                onChange={(e) => setWallConfig((c) => ({ ...c, height: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={inputStyle} />
+            </div>
+            <div>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Thickness ({UNITS[unit].label})</label>
+              <input type="number" min="0.02" step="0.02" value={fmt(metersTo(wallConfig.thickness, unit))}
+                onChange={(e) => setWallConfig((c) => ({ ...c, thickness: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={inputStyle} />
+            </div>
           </div>
-          <label style={labelStyle}>Thickness ({UNITS[unit].label})</label>
-          <input type="number" min="0.02" step="0.02" value={fmt(metersTo(wallConfig.thickness, unit))}
-            onChange={(e) => setWallConfig((c) => ({ ...c, thickness: toMeters(parseFloat(e.target.value) || 0, unit) }))} style={{ ...inputStyle, marginBottom: 8 }} />
-          <label style={labelStyle}>Color</label>
-          <input type="color" value={wallConfig.color}
-            onChange={(e) => setWallConfig((c) => ({ ...c, color: e.target.value }))}
-            style={{ width: "100%", height: 28, border: "none", borderRadius: 6, marginBottom: 4 }} />
-          {walls.length > 0 && (
-            <button onClick={() => setWalls([])} style={{ ...btnStyle, background: "#5a2424", width: "100%", marginTop: 4 }}>Clear all walls</button>
-          )}
-        </Section>
-
-        <Section title="Cameras">
-          <button onClick={saveCamera} style={btnStyle}>+ Save current view</button>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
-            {cameras.map((cam) => (
-              <div key={cam.id} style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => goToCamera(cam)} style={{ ...btnStyle, flex: 1, textAlign: "left" }}>{cam.name}</button>
-                <button onClick={() => deleteCamera(cam.id)} style={{ ...btnStyle, background: "#5a2424", width: 28 }}>×</button>
+          <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Glass ratio — {Math.round(wallConfig.glassRatio * 100)}%</label>
+          <input type="range" min="0" max="1" step="0.05" value={wallConfig.glassRatio}
+            onChange={(e) => setWallConfig((c) => ({ ...c, glassRatio: parseFloat(e.target.value) }))}
+            style={{ width: "100%", accentColor: "#5b4bff", marginBottom: 10 }} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Wall Color</label>
+              <input type="color" value={wallConfig.color}
+                onChange={(e) => setWallConfig((c) => ({ ...c, color: e.target.value }))}
+                style={{ width: "100%", height: 32, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none" }} />
+            </div>
+            {walls.length > 0 && (
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button onClick={() => setWalls([])} style={{ background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "7px 12px", fontSize: 11, cursor: "pointer" }}>Clear all</button>
               </div>
-            ))}
+            )}
           </div>
-          <button onClick={captureRender} style={{ ...btnStyle, marginTop: 8, background: "#2d6a4f" }}>📸 Capture PNG render</button>
         </Section>
 
       </div>
 
+      {/* ===== CANVAS ===== */}
       <div ref={mountRef} onDragOver={(e) => e.preventDefault()} onDrop={handleDrop} style={{ flex: 1, minWidth: 0, position: "relative" }}>
+        {/* Loading overlay */}
         {!libraryReady && (
-          <div style={{
-            position: "absolute", inset: 0, zIndex: 50, display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center", gap: 12,
-            background: "rgba(19,21,26,0.85)", backdropFilter: "blur(2px)",
-          }}>
-            <div style={{
-              width: 32, height: 32, border: "3px solid #33363d", borderTopColor: "#c4622d",
-              borderRadius: "50%", animation: "spin 0.8s linear infinite",
-            }} />
+          <div style={{ position: "absolute", inset: 0, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, background: "rgba(13,15,24,0.9)", backdropFilter: "blur(4px)" }}>
+            <div style={{ width: 36, height: 36, border: "3px solid #1e2035", borderTopColor: "#5b4bff", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
             <style>{"@keyframes spin { to { transform: rotate(360deg); } }"}</style>
-            <div style={{ fontSize: 13, color: "#ccc" }}>{manifestStatus ? manifestStatus.message : "Loading library…"}</div>
+            <div style={{ fontSize: 13, color: "#94a3b8" }}>{manifestStatus ? manifestStatus.message : "Loading library…"}</div>
           </div>
         )}
-        {/* View gizmo */}
-        <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 4, background: "rgba(27,29,34,0.85)", borderRadius: 8, padding: 6 }}>
-          {[["free", "Free", "Perspective"], ["top", "Top", "Orthographic"], ["front", "Front", "Orthographic"], ["side", "Side", "Orthographic"], ["iso", "Iso", "Orthographic"]].map(([key, label, projection]) => (
-            <button
-              key={key}
-              onClick={() => threeRef.current.setView(key)}
-              style={{
-                ...btnStyle, padding: "5px 10px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
-                background: activeView === key ? "#c4622d" : "#33363d",
-              }}
-            >
-              <span>{label}</span>
-              <span style={{ fontSize: 9, opacity: 0.7 }}>{projection}</span>
+
+        {/* View gizmo — top right */}
+        <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 3, background: "rgba(13,17,23,0.85)", borderRadius: 10, padding: 5, backdropFilter: "blur(8px)", border: "1px solid #1e2035" }}>
+          {[["free","Free","Perspective"],["top","Top","Ortho"],["front","Front","Ortho"],["side","Side","Ortho"],["iso","Iso","Ortho"]].map(([key, label, proj]) => (
+            <button key={key} onClick={() => threeRef.current.setView(key)} style={{
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 1,
+              padding: "5px 8px", borderRadius: 7, border: "none", cursor: "pointer",
+              background: activeView === key ? "#5b4bff" : "transparent",
+              color: activeView === key ? "#fff" : "#64748b",
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 600 }}>{label}</span>
+              <span style={{ fontSize: 8, opacity: 0.7 }}>{proj}</span>
             </button>
           ))}
-          <button onClick={() => threeRef.current.resetCamera()} style={{ ...btnStyle, padding: "5px 10px", background: "#33363d" }}>⟲ Reset</button>
+          <div style={{ width: 1, background: "#1e2035", margin: "4px 2px" }} />
+          <button onClick={() => threeRef.current.resetCamera()} title="Reset camera"
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 38, background: "none", border: "none", color: "#64748b", cursor: "pointer", borderRadius: 7 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          </button>
+        </div>
+
+        {/* Camera panel button — below gizmo */}
+        <div style={{ position: "absolute", top: 70, right: 12 }}>
+          <button onClick={() => setShowCameraPanel((v) => !v)}
+            title="Cameras"
+            style={{ width: 36, height: 36, background: showCameraPanel ? "#5b4bff" : "rgba(13,17,23,0.85)", border: "1px solid #1e2035", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={showCameraPanel ? "#fff" : "#64748b"} strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          </button>
+          {showCameraPanel && (
+            <div style={{ position: "absolute", top: 44, right: 0, background: "rgba(13,17,23,0.95)", border: "1px solid #1e2035", borderRadius: 12, padding: 12, width: 200, backdropFilter: "blur(12px)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>Saved Views</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10 }}>
+                {cameras.length === 0 && <div style={{ fontSize: 11, color: "#334155", textAlign: "center", padding: "8px 0" }}>No saved views yet</div>}
+                {cameras.map((cam) => (
+                  <div key={cam.id} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                    <button onClick={() => goToCamera(cam)}
+                      style={{ flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 7, color: "#e2e8f0", padding: "6px 8px", fontSize: 11, cursor: "pointer", textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      📷 {cam.name}
+                    </button>
+                    <button onClick={() => deleteCamera(cam.id)}
+                      style={{ width: 26, height: 26, background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 7, color: "#f87171", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center" }}>×</button>
+                  </div>
+                ))}
+              </div>
+              <button onClick={saveCamera}
+                style={{ width: "100%", background: "#13162a", border: "1px dashed #2a3050", borderRadius: 8, color: "#64748b", padding: "7px", fontSize: 11, cursor: "pointer", marginBottom: 8 }}>
+                + Save current view
+              </button>
+              <button onClick={captureRender}
+                style={{ width: "100%", background: "linear-gradient(135deg, #5b4bff, #7c6dff)", border: "none", borderRadius: 8, color: "#fff", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>
+                📸 Capture Render
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Contextual instructions, bottom-right */}
@@ -2691,6 +2864,37 @@ export default function BoothPlannerV2() {
   );
 }
 
+function ModelDragArea({ def, kind, libraryReady, thumb, color, onDragStart }) {
+  const [hovered, setHovered] = React.useState(false);
+  return (
+    <div
+      draggable={libraryReady}
+      onDragStart={onDragStart}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: 64, height: 64, flexShrink: 0, position: "relative", cursor: libraryReady ? "grab" : "default",
+        background: thumb ? "transparent" : (color || "#1e2035"), borderRadius: "10px 0 0 10px", overflow: "hidden",
+      }}
+    >
+      {thumb
+        ? <img src={thumb} alt={def.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+        : <div style={{ width: "100%", height: "100%", background: color || "#1e2035", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontWeight: 600 }}>{def.name.slice(0, 2).toUpperCase()}</span>
+          </div>
+      }
+      {hovered && (
+        <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(1px)" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+            <span style={{ fontSize: 9, color: "#fff", fontWeight: 700, letterSpacing: "0.05em" }}>DRAG</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onCancel, unit, UNITS, toMeters, fmt, metersTo }) {
   const canvasRef = React.useRef(null);
   const [localUnit, setLocalUnit] = React.useState(unit);
@@ -2877,11 +3081,28 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onCancel,
   );
 }
 
-function Section({ title, children }) {
+function Section({ title, children, badge, defaultOpen = true }) {
+  const [open, setOpen] = React.useState(defaultOpen);
   return (
-    <div style={{ marginBottom: 16 }}>
-      <label style={{ fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.5 }}>{title}</label>
-      <div style={{ marginTop: 6 }}>{children}</div>
+    <div style={{ borderBottom: "1px solid #1e2035" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "none", border: "none", color: "#e2e8f0", cursor: "pointer" }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em" }}>{title}</span>
+          {badge != null && (
+            <span style={{ background: "#5b4bff", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 7px", minWidth: 18, textAlign: "center" }}>{badge}</span>
+          )}
+        </div>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          style={{ transition: "transform 0.2s", transform: open ? "rotate(0deg)" : "rotate(-90deg)", opacity: 0.5 }}>
+          <polyline points="6,9 12,15 18,9"/>
+        </svg>
+      </button>
+      {open && (
+        <div style={{ padding: "0 16px 16px 16px" }}>{children}</div>
+      )}
     </div>
   );
 }
