@@ -1983,9 +1983,45 @@ export default function BoothPlannerV2() {
   const selectedItem = items.find((i) => i.uid === selectedUid);
   const selectedDef = selectedItem && findDef(selectedItem.kind, selectedItem.catalogId);
   const rightPanelOpen = !!(selectedItem && selectedDef);
+  const isWholeGroupSelected = selectedUids.length > 1 && selectedItem?.groupId &&
+    items.filter((it) => selectedUids.includes(it.uid)).every((it) => it.groupId === selectedItem.groupId);
 
   const updateSelected = (patch) => setItems((prev) => prev.map((it) => (it.uid === selectedUid ? { ...it, ...patch } : it)));
+  const updateGroup = (patch) => setItems((prev) => prev.map((it) => (selectedUids.includes(it.uid) ? { ...it, ...patch } : it)));
+  const updateColor = (color) => {
+    if (isWholeGroupSelected) {
+      // cada pieza del grupo mantiene su varyColor relativo al nuevo color base
+      setItems((prev) => {
+        const groupItems = prev.filter((it) => selectedUids.includes(it.uid));
+        return prev.map((it) => {
+          if (!selectedUids.includes(it.uid)) return it;
+          const idx = groupItems.indexOf(it);
+          return { ...it, color: varyColor(color, idx) };
+        });
+      });
+    } else {
+      updateSelected({ color });
+    }
+  };
   const rotateSelected = () => selectedItem && updateSelected({ rotY: selectedItem.rotY + Math.PI / 2 });
+  // rotar cada objeto del grupo sobre su propio origen
+  const rotateGroupEach = (deltaDeg) => {
+    const delta = deltaDeg * Math.PI / 180;
+    setItems((prev) => prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it));
+  };
+  // rotar todo el grupo alrededor del pivote
+  const rotateGroupAroundPivot = (deltaDeg) => {
+    if (!selectedItem?.groupId) return;
+    const delta = deltaDeg * Math.PI / 180;
+    const pivotX = selectedItem.pivotX ?? selectedItem.x;
+    const pivotZ = selectedItem.pivotZ ?? selectedItem.z;
+    setItems((prev) => prev.map((it) => {
+      if (!selectedUids.includes(it.uid)) return it;
+      const dx = it.x - pivotX, dz = it.z - pivotZ;
+      const cos = Math.cos(delta), sin = Math.sin(delta);
+      return { ...it, x: pivotX + dx * cos - dz * sin, z: pivotZ + dx * sin + dz * cos, rotY: it.rotY + delta };
+    }));
+  };
   const deleteSelected = () => { setItems((prev) => prev.filter((it) => !selectedUids.includes(it.uid))); setSelectedUids([]); };
   const duplicateSelected = () => {
     if (!selectedUids.length) return;
@@ -2957,8 +2993,21 @@ export default function BoothPlannerV2() {
               <span style={{ fontSize: 12, color: "#888" }}>°</span>
             </div>
           )}
+          {isWholeGroupSelected && (
+            <>
+              <div style={{ fontSize: 11, color: "#777", marginBottom: 6 }}>Group rotation</div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                <button onClick={() => rotateGroupEach(-15)} style={{ ...btnStyle, flex: 1 }}>↺ Each</button>
+                <button onClick={() => rotateGroupEach(15)} style={{ ...btnStyle, flex: 1 }}>↻ Each</button>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                <button onClick={() => rotateGroupAroundPivot(-15)} style={{ ...btnStyle, flex: 1 }}>↺ Pivot</button>
+                <button onClick={() => rotateGroupAroundPivot(15)} style={{ ...btnStyle, flex: 1 }}>↻ Pivot</button>
+              </div>
+            </>
+          )}
           <label style={labelStyle}>Color</label>
-          <input type="color" value={selectedItem.color} onChange={(e) => updateSelected({ color: e.target.value })} style={{ width: "100%", height: 28, marginBottom: 12, border: "none", borderRadius: 6 }} />
+          <input type="color" value={selectedItem.color} onChange={(e) => updateColor(e.target.value)} style={{ width: "100%", height: 28, marginBottom: 12, border: "none", borderRadius: 6 }} />
 
           {selectedItem.kind === "model" && selectedDef.sockets && selectedDef.sockets.length > 0 && (
             <>
