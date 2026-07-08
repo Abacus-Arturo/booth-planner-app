@@ -2605,7 +2605,7 @@ export default function BoothPlannerV2() {
           const catItems = catalog.filter((c) => (c.category || "Models") === cat && c.category !== "Props");
           const catCount = items.filter((it) => it.kind === "model" && catItems.some((c) => c.id === it.catalogId)).length;
           return (
-            <Section key={cat} title={cat} badge={catCount > 0 ? catCount : null}>
+            <Section key={cat} title={cat} defaultOpen={false} badge={catCount > 0 ? catCount : null}>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {catItems.map((c) => {
                   const thumb = thumbnails[c.id];
@@ -2650,7 +2650,7 @@ export default function BoothPlannerV2() {
         })}
 
         {/* Primitives */}
-        <Section title="Primitives" badge={items.filter((it) => it.kind === "primitive").length || null}>
+        <Section title="Primitives" defaultOpen={false} badge={items.filter((it) => it.kind === "primitive").length || null}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {PRIMITIVES.map((p) => {
               const PRIM_ICONS = {
@@ -2673,7 +2673,7 @@ export default function BoothPlannerV2() {
         </Section>
 
         {/* Props & Accessories */}
-        <Section title="Props & Accessories" badge={items.filter((it) => it.kind === "prop").length || null}>
+        <Section title="Props & Accessories" defaultOpen={false} badge={items.filter((it) => it.kind === "prop").length || null}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
             {[...PROPS, ...catalog.filter((c) => c.category === "Props")].map((p) => {
               const count = itemCounts[p.id] || 0;
@@ -2710,7 +2710,7 @@ export default function BoothPlannerV2() {
         )}
 
         {/* Walls & Structure */}
-        <Section title="Walls & Structure" badge={walls.length || null}>
+        <Section title="Walls & Structure" defaultOpen={false} badge={walls.length || null}>
           <button onClick={() => {
             setWallToolActive((v) => {
               if (v) { wallStateRef.current = { active: false, start: null, end: null }; threeRef.current.clearWallGhost && threeRef.current.clearWallGhost(); }
