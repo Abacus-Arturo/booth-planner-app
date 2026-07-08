@@ -862,6 +862,8 @@ export default function BoothPlannerV2() {
                 lineCountRef.current = groupItems.length - 1;
                 threeRef.current.setLineCountUI(groupItems.length - 1);
                 draggingWallHandleRef.current = { type: 'array', groupId };
+                // ocultar sprite y items reales
+                h.visible = false;
                 groupItems.forEach((it) => {
                   const c = itemGroup.children.find((c) => c.userData.uid === it.uid);
                   if (c) c.visible = false;
@@ -875,6 +877,8 @@ export default function BoothPlannerV2() {
                 lineCountRef.current = 2;
                 threeRef.current.setLineCountUI(2);
                 draggingWallHandleRef.current = { type: 'array' };
+                // ocultar sprite y item original
+                h.visible = false;
                 const c = itemGroup.children.find((c) => c.userData.uid === srcItem.uid);
                 if (c) c.visible = false;
               }
@@ -1403,6 +1407,29 @@ export default function BoothPlannerV2() {
     if (!handleGroup) return;
     while (handleGroup.children.length) handleGroup.children.pop();
 
+    // Helper: sprite con "+" que siempre mira a la cámara
+    const makeHandleSprite = (hexColor) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128; canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      ctx.shadowColor = 'rgba(0,0,0,0.4)';
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = `#${hexColor.toString(16).padStart(6, '0')}`;
+      ctx.beginPath();
+      ctx.arc(64, 64, 52, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(28, 56, 72, 16);
+      ctx.fillRect(56, 28, 16, 72);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(0.5, 0.5, 1);
+      sprite.renderOrder = 999;
+      return sprite;
+    };
+
     // Wall handles (orange)
     if (selectedWallUid) {
       const wall = walls.find((w) => w.uid === selectedWallUid);
@@ -1423,41 +1450,23 @@ export default function BoothPlannerV2() {
       }
     }
 
-    // Single object — "+" array expand handle (green)
+    // Single object — "+" array expand handle (green sprite)
     if (selectedUids.length === 1 && !selectedWallUid) {
       const it = items.find((i) => i.uid === selectedUids[0]);
       const def = it && findDef(it.kind, it.catalogId);
       if (it && def && it.kind === 'model') {
-        // posición de la esfera: +X local del objeto (a su derecha según su rotación)
         const offset = (def.w || 1) / 2 + 0.3;
         const sx = it.x + Math.sin(it.rotY + Math.PI / 2) * offset;
         const sz = it.z + Math.cos(it.rotY + Math.PI / 2) * offset;
-
-        const group = new THREE.Group();
-        group.position.set(sx, 0.2, sz);
-        group.renderOrder = 999;
-        group.userData.isArrayHandle = true;
-        group.userData.sourceUid = it.uid;
-
-        // Esfera base
-        const sphere = new THREE.Mesh(
-          new THREE.SphereGeometry(0.16, 16, 16),
-          new THREE.MeshBasicMaterial({ color: 0x4ade80, depthTest: false })
-        );
-        group.add(sphere);
-
-        // "+" símbolo encima (dos cilindros cruzados)
-        const barMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
-        const h = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.03, 0.03), barMat);
-        const v = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.14), barMat);
-        h.position.y = 0.17; v.position.y = 0.17;
-        group.add(h); group.add(v);
-
-        handleGroup.add(group);
+        const sprite = makeHandleSprite(0x4ade80);
+        sprite.position.set(sx, 0.5, sz);
+        sprite.userData.isArrayHandle = true;
+        sprite.userData.sourceUid = it.uid;
+        handleGroup.add(sprite);
       }
     }
 
-    // Group handles — two cyan spheres at extremes for re-editing
+    // Group handles — solo sprite del extremo final (el del inicio no existe)
     if (selectedUids.length > 1) {
       const selItems = items.filter((it) => selectedUids.includes(it.uid));
       const allSameGroup = selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
@@ -1467,32 +1476,15 @@ export default function BoothPlannerV2() {
           const db = Math.hypot(b.x - selItems[0].pivotX, b.z - (selItems[0].pivotZ ?? 0));
           return da - db;
         });
-        const first = sorted[0], last = sorted[sorted.length - 1];
-        const makeGroupHandle = (x, z, role, visible = true) => {
-          const grp = new THREE.Group();
-          grp.position.set(x, 0.22, z);
-          grp.renderOrder = 999;
-          grp.userData.isLineHandle = true;
-          grp.userData.groupId = selItems[0].groupId;
-          grp.userData.role = role;
-          grp.userData.pivotX = selItems[0].pivotX;
-          grp.userData.pivotZ = selItems[0].pivotZ ?? 0;
-          const sph = new THREE.Mesh(
-            new THREE.SphereGeometry(0.14, 16, 16),
-            new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false })
-          );
-          grp.add(sph);
-          // "+" en los handles de grupo también
-          const bm = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
-          const hb = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.03, 0.03), bm);
-          const vb = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.12), bm);
-          hb.position.y = 0.15; vb.position.y = 0.15;
-          grp.add(hb); grp.add(vb);
-          grp.children.forEach((c) => { c.visible = visible; });
-          return grp;
-        };
-        handleGroup.add(makeGroupHandle(first.x, first.z, 'start', false));
-        handleGroup.add(makeGroupHandle(last.x, last.z, 'end', true));
+        const last = sorted[sorted.length - 1];
+        const sprite = makeHandleSprite(0x00e5ff);
+        sprite.position.set(last.x, 0.5, last.z);
+        sprite.userData.isLineHandle = true;
+        sprite.userData.groupId = selItems[0].groupId;
+        sprite.userData.role = 'end';
+        sprite.userData.pivotX = selItems[0].pivotX;
+        sprite.userData.pivotZ = selItems[0].pivotZ ?? 0;
+        handleGroup.add(sprite);
       }
     }
   }, [selectedWallUid, selectedUids, walls, items, findDef]);
