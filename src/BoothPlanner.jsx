@@ -31,7 +31,12 @@ const PRIMITIVES = [
 ];
 
 // Props: objetos pequeños con posición/altura libres, que se pueden "pegar" (attach) a otro objeto arrastrándolos encima.
-const PROPS = [];
+const PROPS = [
+  { id: "prop_plant", name: "Plant", kind: "cylinder", w: 0.4, d: 0.4, h: 0.7, color: "#3f7d44" },
+  { id: "prop_screen", name: "Screen", kind: "box", w: 0.9, d: 0.06, h: 0.55, color: "#1a1a1a" },
+  { id: "prop_sign", name: "Sign", kind: "box", w: 0.5, d: 0.05, h: 0.3, color: "#d9c46a" },
+  { id: "prop_chair", name: "Chair", kind: "box", w: 0.45, d: 0.45, h: 0.45, color: "#8a5a3b" },
+];
 
 function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
@@ -646,8 +651,6 @@ export default function BoothPlannerV2() {
     const onDown = (e) => {
       if (e.button === 2) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; }
       else if (e.button === 1) { isPanning = true; panLastX = e.clientX; panLastY = e.clientY; e.preventDefault(); }
-      // Alt + left drag = orbit (Magic Mouse / trackpad)
-      else if (e.button === 0 && e.altKey) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
     };
     const onMoveOrbit = (e) => {
       if (isPanning) {
@@ -670,26 +673,9 @@ export default function BoothPlannerV2() {
     };
     const onUp = () => { isOrbiting = false; isPanning = false; };
     const onWheel = (e) => {
-      e.preventDefault();
-      // Normalizar deltaY según deltaMode (pixel vs line vs page)
-      const normY = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
-      const normX = e.deltaMode === 1 ? e.deltaX * 20 : e.deltaMode === 2 ? e.deltaX * 400 : e.deltaX;
-
-      // Dos dedos con componente horizontal = pan (trackpad/Magic Mouse)
-      if (Math.abs(normX) > Math.abs(normY) * 0.3 && !e.ctrlKey) {
-        const forward = new THREE.Vector3().subVectors(target, activeCam.position).normalize();
-        const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
-        const upV = new THREE.Vector3().crossVectors(right, forward).normalize();
-        const panSpeed = radius * 0.003;
-        target.addScaledVector(right, normX * panSpeed * 0.01);
-        target.addScaledVector(upV, -normY * panSpeed * 0.01);
-        updateCamera();
-        return;
-      }
-
-      // Array mode: scroll = cantidad de copias
       if (lineStateRef.current.active) {
-        const delta = normY > 0 ? -1 : 1;
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -1 : 1;
         const next = Math.max(1, lineCountRef.current + delta);
         lineCountRef.current = next;
         threeRef.current.setLineCountUI(next);
@@ -697,7 +683,8 @@ export default function BoothPlannerV2() {
         return;
       }
       if (arrayHandleActiveRef.current) {
-        const delta = normY > 0 ? -1 : 1;
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -1 : 1;
         const next = Math.max(1, lineCountRef.current + delta);
         lineCountRef.current = next;
         threeRef.current.setLineCountUI(next);
@@ -705,11 +692,7 @@ export default function BoothPlannerV2() {
         if (state) threeRef.current.buildArrayGhosts(state.origin, state.endPt, next, state.src, 0);
         return;
       }
-
-      // Zoom — normalizado y menos sensible
-      const zoomDelta = normY * 0.003;
-      radius = Math.min(Math.max(radius + zoomDelta * radius * 0.1, 3), 40);
-      updateCamera();
+      radius = Math.min(Math.max(radius + e.deltaY * 0.01, 3), 40); updateCamera();
     };
     const onCtx = (e) => e.preventDefault();
     dom.addEventListener("pointerdown", onDown);
@@ -911,9 +894,7 @@ export default function BoothPlannerV2() {
       }
       // check walls first
       const wallHits = raycaster.intersectObjects(wallGroup.children, true);
-      const hits = raycaster.intersectObjects(itemGroup.children, true);
-      // solo seleccionar pared si está más cerca que cualquier objeto
-      if (wallHits.length && (!hits.length || wallHits[0].distance < hits[0].distance)) {
+      if (wallHits.length) {
         let obj = wallHits[0].object;
         while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
         const wuid = obj.userData.wallUid;
@@ -931,6 +912,7 @@ export default function BoothPlannerV2() {
         }
         return;
       }
+      const hits = raycaster.intersectObjects(itemGroup.children, true);
       if (hits.length) {
         let obj = hits[0].object;
         while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
@@ -1602,26 +1584,25 @@ export default function BoothPlannerV2() {
       loadedUidsRef.current.delete(it.uid); // permite recargar si el nuevo modelo trae GLB
 
       const pw = it.w ?? def.w, pdz = it.d ?? def.d, ph = it.h ?? def.h;
-      const hasFile = !!(def.file);
-      const placeholderGeo = (it.kind !== "model" && !hasFile) ? buildPlaceholderGeometry(def.kind, pw, pdz, ph) : new THREE.BoxGeometry(def.w, def.h, def.d);
+      const placeholderGeo = it.kind !== "model" ? buildPlaceholderGeometry(def.kind, pw, pdz, ph) : new THREE.BoxGeometry(def.w, def.h, def.d);
       const placeholderMat = new THREE.MeshStandardMaterial({ color: it.color || def.color || "#888888", roughness: 0.45, metalness: 0.15 });
       const placeholder = new THREE.Mesh(placeholderGeo, placeholderMat);
       placeholder.castShadow = true;
       placeholder.receiveShadow = true;
-      placeholder.position.y = ((it.kind !== "model" && !hasFile) ? ph : def.h) / 2;
+      placeholder.position.y = (it.kind !== "model" ? ph : def.h) / 2;
       placeholder.userData.isPlaceholder = true;
       placeholder.userData.curW = pw; placeholder.userData.curD = pdz; placeholder.userData.curH = ph;
       container.add(placeholder);
 
       if (container.userData.outline) { container.remove(container.userData.outline); container.userData.outline.geometry.dispose(); container.userData.outline.material.dispose(); }
-      const phForOutline = (it.kind !== "model" && !hasFile) ? ph : def.h;
+      const phForOutline = it.kind !== "model" ? ph : def.h;
       const outline = buildOutlineBox(pw, phForOutline, pdz);
       outline.position.y = phForOutline / 2;
       outline.visible = false;
       container.userData.outline = outline;
       container.add(outline);
 
-      if ((it.kind === "model" || (it.kind === "prop" && def.file)) && def.file && !loadedUidsRef.current.has(it.uid)) {
+      if (it.kind === "model" && def.file && !loadedUidsRef.current.has(it.uid)) {
         loadedUidsRef.current.add(it.uid);
         getModelClone(def.file)
           .then((root) => {
@@ -2938,27 +2919,16 @@ export default function BoothPlannerV2() {
               <div>Ctrl/Cmd + D: duplicate</div>
               <div>Ctrl/Cmd + Z: undo · Ctrl/Cmd + Y: redo</div>
               <div>Shift+click: add/remove from selection</div>
-              {/Mac|iPhone|iPad/.test(navigator.platform) ? (
-                <div>Right-click or Alt + drag: orbit · Two-finger scroll: pan & zoom</div>
-              ) : (
-                <div>Right-click + drag: orbit · Middle-click: pan</div>
-              )}
+              <div>Right-click + drag: orbit camera</div>
             </>
           ) : (
             <>
-              <div>Click: select · Drag: move</div>
+              <div>Click: select/move</div>
               <div>Shift+click: multi-select</div>
-              {/Mac|iPhone|iPad/.test(navigator.platform) ? (
-                <>
-                  <div>Right-click or Alt + drag: orbit camera</div>
-                  <div>Two-finger swipe: pan · Scroll: zoom</div>
-                </>
-              ) : (
-                <>
-                  <div>Right-click + drag: orbit camera</div>
-                  <div>Middle-click + drag: pan · Scroll: zoom</div>
-                </>
-              )}
+              <div>Right-click + drag: orbit camera</div>
+              <div>Middle-click + drag: pan</div>
+              <div>Scroll: zoom</div>
+            </>
           )}
         </div>
       </div>
@@ -3161,14 +3131,10 @@ export default function BoothPlannerV2() {
                         </div>
                       </div>
                       {isLamp && isOn && (
-                        <div style={{ borderTop: "1px solid #1e2035", padding: "8px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{ borderTop: "1px solid #1e2035", padding: "8px 12px" }}>
                           <button onClick={() => { const sc = selectedItem.sockets[sName]; if (!sc) return; setItems((prev) => prev.map((it) => it.uid !== selectedItem.uid && it.catalogId === selectedItem.catalogId ? { ...it, sockets: { ...it.sockets, [sName]: sc } } : it)); }}
                             style={{ width: "100%", background: "#13162a", border: `1px solid ${accentColor}33`, borderRadius: 7, color: accentColor, fontSize: 10, padding: "6px", cursor: "pointer", fontWeight: 600 }}>
                             Apply to all {selectedDef.name}
-                          </button>
-                          <button onClick={() => setItems((prev) => prev.map((it) => it.catalogId === selectedItem.catalogId ? { ...it, sockets: { ...it.sockets, [sName]: null } } : it))}
-                            style={{ width: "100%", background: "#13162a", border: "1px solid #2a2f4a", borderRadius: 7, color: "#64748b", fontSize: 10, padding: "6px", cursor: "pointer", fontWeight: 600 }}>
-                            Turn off all {selectedDef.name}
                           </button>
                         </div>
                       )}
