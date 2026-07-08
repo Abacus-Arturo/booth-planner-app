@@ -457,6 +457,7 @@ export default function BoothPlannerV2() {
   const [selectedWallUid, setSelectedWallUid] = useState(null);
   const draggingWallHandleRef = useRef(null); // { type, wallUid/groupId/sourceUid, endpoint/role }
   const arrayHandleActiveRef = useRef(false); // true cuando estamos en modo array desde handle
+  const [arrayHandleActive, setArrayHandleActive] = useState(false);
   const arrayHandleSourceRef = useRef(null); // { uid, x, z, catalogId, kind, color, rotY } del objeto original
   const selectedUid = selectedUids.length ? selectedUids[selectedUids.length - 1] : null;
   const [dragCatalog, setDragCatalog] = useState(null);
@@ -861,6 +862,7 @@ export default function BoothPlannerV2() {
                 arrayHandleSourceRef.current = { ...src };
                 lineCountRef.current = groupItems.length - 1;
                 threeRef.current.setLineCountUI(groupItems.length - 1);
+                threeRef.current.setArrayHandleActive(true);
                 draggingWallHandleRef.current = { type: 'array', groupId };
                 // ocultar sprite y items reales
                 h.visible = false;
@@ -876,6 +878,7 @@ export default function BoothPlannerV2() {
                 arrayHandleSourceRef.current = { ...srcItem };
                 lineCountRef.current = 2;
                 threeRef.current.setLineCountUI(2);
+                threeRef.current.setArrayHandleActive(true);
                 draggingWallHandleRef.current = { type: 'array' };
                 // ocultar sprite y item original
                 h.visible = false;
@@ -1176,6 +1179,7 @@ export default function BoothPlannerV2() {
         }
         arrayHandleActiveRef.current = false;
         arrayHandleSourceRef.current = null;
+        threeRef.current.setArrayHandleActive(false);
       }
       if (draggingWallHandleRef.current) {
         draggingWallHandleRef.current = null;
@@ -1217,6 +1221,7 @@ export default function BoothPlannerV2() {
 
     threeRef.current = {
       scene, camera, renderer, itemGroup, wallGroup, handleGroup, floor, dom,
+      clearGhosts,
       target, getRadiusThetaPhi: () => ({ radius, theta, phi }),
       setRadiusThetaPhi: (r, t, p) => { radius = r; theta = t; phi = p; updateCamera(); },
       getActiveCamera: () => activeCam,
@@ -1253,6 +1258,7 @@ export default function BoothPlannerV2() {
       commitLineItems: (newItems) => setItems((prev) => [...prev, ...newItems]),
       clearPendingLine: () => setPendingLineDef(null),
       setLineCountUI: (n) => setLineCount(n),
+      setArrayHandleActive: (v) => setArrayHandleActive(v),
       commitWall: (wall) => setWalls((prev) => {
         const EPS = 0.08;
         const t = (wall.thickness || 0.1) / 2;
@@ -1454,7 +1460,7 @@ export default function BoothPlannerV2() {
     if (selectedUids.length === 1 && !selectedWallUid) {
       const it = items.find((i) => i.uid === selectedUids[0]);
       const def = it && findDef(it.kind, it.catalogId);
-      if (it && def && it.kind === 'model') {
+      if (it && def) {
         const offset = (def.w || 1) / 2 + 0.3;
         const sx = it.x + Math.sin(it.rotY + Math.PI / 2) * offset;
         const sz = it.z + Math.cos(it.rotY + Math.PI / 2) * offset;
@@ -1921,14 +1927,23 @@ export default function BoothPlannerV2() {
           threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
           setWallToolActive(false);
         }
+        if (arrayHandleActiveRef.current) {
+          arrayHandleActiveRef.current = false;
+          arrayHandleSourceRef.current = null;
+          threeRef.current.setArrayHandleActive(false);
+          draggingWallHandleRef.current = null;
+          threeRef.current.clearGhosts && threeRef.current.clearGhosts();
+          // restaurar visibilidad de todos los items
+          const { itemGroup } = threeRef.current;
+          if (itemGroup) itemGroup.children.forEach((c) => { c.visible = true; });
+        }
         return;
       }
 
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-        if (inInput) return; // no interferir mientras escribe
+        if (inInput) return;
         const deg = e.shiftKey ? 1 : 15;
         const delta = (e.key === "ArrowLeft" ? -1 : 1) * (deg * Math.PI / 180);
-        // si hay una línea activa (modo línea, punto inicial ya puesto), las flechas ajustan su orientación
         const handledByLine = threeRef.current.adjustLineAngle && threeRef.current.adjustLineAngle(delta);
         if (handledByLine) { e.preventDefault(); return; }
         if (!selectedUids.length) return;
@@ -1937,14 +1952,20 @@ export default function BoothPlannerV2() {
           const selItems = prev.filter((it) => selectedUids.includes(it.uid));
           const allSameGroup = selItems.length > 1 && selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
           if (allSameGroup) {
-            const pivotX = selItems[0].pivotX ?? selItems[0].x;
-            const pivotZ = selItems[0].pivotZ ?? selItems[0].z;
-            const axis = new THREE.Vector3(0, 1, 0);
-            return prev.map((it) => {
-              if (!selectedUids.includes(it.uid)) return it;
-              const rel = new THREE.Vector3(it.x - pivotX, 0, it.z - pivotZ).applyAxisAngle(axis, delta);
-              return { ...it, x: pivotX + rel.x, z: pivotZ + rel.z, rotY: it.rotY + delta };
-            });
+            if (e.shiftKey) {
+              // Shift = cada objeto rota en su propio origen
+              return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
+            } else {
+              // Normal = todo el grupo rota alrededor del pivote
+              const pivotX = selItems[0].pivotX ?? selItems[0].x;
+              const pivotZ = selItems[0].pivotZ ?? selItems[0].z;
+              const axis = new THREE.Vector3(0, 1, 0);
+              return prev.map((it) => {
+                if (!selectedUids.includes(it.uid)) return it;
+                const rel = new THREE.Vector3(it.x - pivotX, 0, it.z - pivotZ).applyAxisAngle(axis, delta);
+                return { ...it, x: pivotX + rel.x, z: pivotZ + rel.z, rotY: it.rotY + delta };
+              });
+            }
           }
           return prev.map((it) => (selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it));
         });
@@ -2645,10 +2666,6 @@ export default function BoothPlannerV2() {
                   {count > 0 && <span style={{ position: "absolute", top: 6, right: 6, background: "#5b4bff", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 5px" }}>{count}</span>}
                   {PRIM_ICONS[p.kind] || PRIM_ICONS.box}
                   <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>{p.name}</span>
-                  <button onClick={(e) => { e.stopPropagation(); setPendingLineDef({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" }); }}
-                    style={{ width: "100%", background: "#1e2035", border: "none", borderRadius: 6, color: "#94a3b8", padding: "3px 0", fontSize: 10, cursor: "pointer" }}>
-                    Array
-                  </button>
                 </div>
               );
             })}
@@ -2757,6 +2774,67 @@ export default function BoothPlannerV2() {
             <div style={{ fontSize: 13, color: "#94a3b8" }}>{manifestStatus ? manifestStatus.message : "Loading library…"}</div>
           </div>
         )}
+
+        {/* Hint panel — top left */}
+        {(() => {
+          let title = null, color = "#94a3b8", hints = [];
+          if (arrayHandleActive) {
+            title = "Array mode"; color = "#4ade80";
+            hints = [
+              { key: "Scroll", desc: "number of copies" },
+              { key: "Shift", desc: "free angle" },
+              { key: "Alt", desc: "snap to width" },
+              { key: "Esc", desc: "cancel" },
+            ];
+          } else if (pendingLineDef) {
+            title = `Array: ${pendingLineDef.def.name}`; color = "#4ade80";
+            hints = [
+              { key: "Click", desc: "set start point" },
+              { key: "Scroll", desc: `copies (${lineCount})` },
+              { key: "← →", desc: "rotate line" },
+              { key: "Click", desc: "place" },
+            ];
+          } else if (wallToolActive) {
+            title = "Wall tool"; color = "#5b4bff";
+            hints = [
+              { key: "Click", desc: "set point" },
+              { key: "Shift", desc: "free position" },
+              { key: "Alt", desc: "free angle" },
+              { key: "Esc", desc: "finish" },
+            ];
+          } else if (selectedUids.length === 1 && selectedItem) {
+            title = selectedItem.kind === "wall" ? "Wall selected" : "Object selected"; color = "#00e5ff";
+            hints = [
+              { key: "← →", desc: "rotate 15°" },
+              { key: "Shift + ← →", desc: "rotate 1°" },
+              { key: "Ctrl+D", desc: "duplicate" },
+              { key: "Del", desc: "delete" },
+              { key: "✚", desc: "drag to create array" },
+            ];
+          } else if (selectedUids.length > 1) {
+            title = `Group (${selectedUids.length} objects)`; color = "#00e5ff";
+            hints = [
+              { key: "← →", desc: "rotate around pivot" },
+              { key: "Shift + ← →", desc: "rotate each in place" },
+              { key: "Del", desc: "delete all" },
+              { key: "✚", desc: "drag to re-edit array" },
+            ];
+          }
+          if (!title) return null;
+          return (
+            <div style={{ position: "absolute", top: 12, left: 12, background: "rgba(13,15,24,0.88)", border: `1px solid ${color}33`, borderRadius: 10, padding: "10px 14px", minWidth: 220, zIndex: 10, backdropFilter: "blur(8px)" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color, marginBottom: 8, letterSpacing: "0.04em", textTransform: "uppercase" }}>{title}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                {hints.map(({ key, desc }, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 5, color: "#e2e8f0", fontSize: 10, fontWeight: 600, padding: "2px 7px", whiteSpace: "nowrap", fontFamily: "monospace" }}>{key}</span>
+                    <span style={{ color: "#94a3b8", fontSize: 11 }}>{desc}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* View gizmo — top right */}
         <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 3, background: "rgba(13,17,23,0.85)", borderRadius: 10, padding: 5, backdropFilter: "blur(8px)", border: "1px solid #1e2035" }}>
@@ -2981,7 +3059,7 @@ export default function BoothPlannerV2() {
           )}
 
           <label style={labelStyle}>Rotation</label>
-          <div style={{ fontSize: 11, color: "#777", marginBottom: 4 }}>← → = 15° · Shift + ← → = 1°</div>
+          <div style={{ fontSize: 11, color: "#777", marginBottom: 4 }}>← → = 15° · Shift + ← → = {isWholeGroupSelected ? "cada objeto" : "1°"}</div>
           {selectedUids.length === 1 && (
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
               <input
@@ -2992,19 +3070,6 @@ export default function BoothPlannerV2() {
               />
               <span style={{ fontSize: 12, color: "#888" }}>°</span>
             </div>
-          )}
-          {isWholeGroupSelected && (
-            <>
-              <div style={{ fontSize: 11, color: "#777", marginBottom: 6 }}>Group rotation</div>
-              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                <button onClick={() => rotateGroupEach(-15)} style={{ ...btnStyle, flex: 1 }}>↺ Each</button>
-                <button onClick={() => rotateGroupEach(15)} style={{ ...btnStyle, flex: 1 }}>↻ Each</button>
-              </div>
-              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                <button onClick={() => rotateGroupAroundPivot(-15)} style={{ ...btnStyle, flex: 1 }}>↺ Pivot</button>
-                <button onClick={() => rotateGroupAroundPivot(15)} style={{ ...btnStyle, flex: 1 }}>↻ Pivot</button>
-              </div>
-            </>
           )}
           <label style={labelStyle}>Color</label>
           <input type="color" value={selectedItem.color} onChange={(e) => updateColor(e.target.value)} style={{ width: "100%", height: 28, marginBottom: 12, border: "none", borderRadius: 6 }} />
@@ -3066,13 +3131,6 @@ export default function BoothPlannerV2() {
               </div>
             </>
           )}
-
-          <label style={labelStyle}>Array</label>
-          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <input type="number" min="1" value={arrayCount} onChange={(e) => setArrayCount(parseInt(e.target.value) || 1)} style={inputStyle} placeholder="qty." />
-            <input type="number" min="0.1" step="0.1" value={fmt(metersTo(arraySpacing, unit))} onChange={(e) => setArraySpacing(toMeters(parseFloat(e.target.value) || 0, unit))} style={inputStyle} placeholder="spacing" />
-          </div>
-          <button onClick={makeArray} style={{ ...btnStyle, marginBottom: 12, width: "100%" }}>Create array</button>
 
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
             <button onClick={rotateSelected} style={btnStyle}>Rotate 90°</button>
