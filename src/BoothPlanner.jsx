@@ -439,6 +439,8 @@ export default function BoothPlannerV2() {
     }
     return null;
   }, [catalog]);
+  const findDefRef = useRef(findDef);
+  useEffect(() => { findDefRef.current = findDef; }, [findDef]);
   const [items, setItems] = useState([]); // {uid, catalogId, kind, x,z,rotY,color,sockets,groupId}
   const [walls, setWalls] = useState([]); // {uid, x1,z1,x2,z2, height, glassRatio, thickness, color}
   const wallsRef = useRef(walls);
@@ -453,7 +455,9 @@ export default function BoothPlannerV2() {
   }, [items, walls, pushHistory]);
   const [selectedUids, setSelectedUids] = useState([]); // array de uids
   const [selectedWallUid, setSelectedWallUid] = useState(null);
-  const draggingWallHandleRef = useRef(null); // { wallUid, endpoint: 'start'|'end' }
+  const draggingWallHandleRef = useRef(null); // { type, wallUid/groupId/sourceUid, endpoint/role }
+  const arrayHandleActiveRef = useRef(false); // true cuando estamos en modo array desde handle
+  const arrayHandleSourceRef = useRef(null); // { uid, x, z, catalogId, kind, color, rotY } del objeto original
   const selectedUid = selectedUids.length ? selectedUids[selectedUids.length - 1] : null;
   const [dragCatalog, setDragCatalog] = useState(null);
   const [cameras, setCameras] = useState([]);
@@ -677,6 +681,16 @@ export default function BoothPlannerV2() {
         buildLineGhostsWithOffset(lineStateRef.current.start, lineStateRef.current.end, next, pendingLineDefRef.current);
         return;
       }
+      if (arrayHandleActiveRef.current) {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -1 : 1;
+        const next = Math.max(1, lineCountRef.current + delta);
+        lineCountRef.current = next;
+        threeRef.current.setLineCountUI(next);
+        const state = threeRef.current._arrayDragState;
+        if (state) threeRef.current.buildArrayGhosts(state.origin, state.endPt, next, state.src, 0);
+        return;
+      }
       radius = Math.min(Math.max(radius + e.deltaY * 0.01, 3), 40); updateCamera();
     };
     const onCtx = (e) => e.preventDefault();
@@ -719,6 +733,7 @@ export default function BoothPlannerV2() {
     };
 
     const lineAngleOffsetRef = { current: 0 };
+    threeRef.current.lineAngleOffsetRef = lineAngleOffsetRef;
     const buildLineGhostsWithOffset = (start, end, count, defInfo) => {
       clearGhosts();
       if (!defInfo) return;
@@ -825,17 +840,49 @@ export default function BoothPlannerV2() {
       // ---- Wall handle + Line handle drag ----
       const { handleGroup } = threeRef.current;
       if (handleGroup && handleGroup.children.length) {
-        const handleHits = raycaster.intersectObjects(handleGroup.children, false);
+        const handleHits = raycaster.intersectObjects(handleGroup.children, true);
         if (handleHits.length) {
-          const h = handleHits[0].object;
-          if (h.userData.isWallHandle) {
-            draggingWallHandleRef.current = { type: 'wall', wallUid: h.userData.wallUid, endpoint: h.userData.endpoint };
-          } else if (h.userData.isLineHandle) {
-            draggingWallHandleRef.current = { type: 'line', groupId: h.userData.groupId, role: h.userData.role, pivotX: h.userData.pivotX, pivotZ: h.userData.pivotZ };
+          let h = handleHits[0].object;
+          while (h && !h.userData.isWallHandle && !h.userData.isLineHandle && !h.userData.isArrayHandle && h.parent !== null) {
+            h = h.parent;
           }
-          dragArmed = false;
-          dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
-          return;
+          if (h && (h.userData.isWallHandle || h.userData.isLineHandle || h.userData.isArrayHandle)) {
+            if (h.userData.isWallHandle) {
+              draggingWallHandleRef.current = { type: 'wall', wallUid: h.userData.wallUid, endpoint: h.userData.endpoint };
+            } else if (h.userData.isLineHandle) {
+              const groupId = h.userData.groupId;
+              const groupItems = itemsRef.current.filter((it) => it.groupId === groupId);
+              if (groupItems.length) {
+                const pivot = { x: h.userData.pivotX, z: h.userData.pivotZ };
+                const src = [...groupItems].sort((a, b) =>
+                  Math.hypot(a.x - pivot.x, a.z - pivot.z) - Math.hypot(b.x - pivot.x, b.z - pivot.z)
+                )[0];
+                arrayHandleActiveRef.current = true;
+                arrayHandleSourceRef.current = { ...src };
+                lineCountRef.current = groupItems.length - 1;
+                threeRef.current.setLineCountUI(groupItems.length - 1);
+                draggingWallHandleRef.current = { type: 'array', groupId };
+                groupItems.forEach((it) => {
+                  const c = itemGroup.children.find((c) => c.userData.uid === it.uid);
+                  if (c) c.visible = false;
+                });
+              }
+            } else if (h.userData.isArrayHandle) {
+              const srcItem = itemsRef.current.find((it) => it.uid === h.userData.sourceUid);
+              if (srcItem) {
+                arrayHandleActiveRef.current = true;
+                arrayHandleSourceRef.current = { ...srcItem };
+                lineCountRef.current = 2;
+                threeRef.current.setLineCountUI(2);
+                draggingWallHandleRef.current = { type: 'array' };
+                const c = itemGroup.children.find((c) => c.userData.uid === srcItem.uid);
+                if (c) c.visible = false;
+              }
+            }
+            dragArmed = false;
+            dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
+            return;
+          }
         }
       }
       // check walls first
@@ -969,10 +1016,29 @@ export default function BoothPlannerV2() {
           snapIndicator.visible = snapped;
           threeRef.current.moveWallEndpoint(handle.wallUid, handle.endpoint, finalPt.x, finalPt.z);
 
-        } else if (handle.type === 'line') {
-          // redistribuir todos los items del grupo entre el pivote y el nuevo punto
-          const pt = e.altKey ? raw : snapLineEnd(new THREE.Vector3(handle.pivotX, 0, handle.pivotZ), raw, false);
-          threeRef.current.redistributeLineGroup(handle.groupId, handle.pivotX, handle.pivotZ, pt.x, pt.z);
+        } else if (handle.type === 'array') {
+          const src = arrayHandleSourceRef.current;
+          if (!src) return;
+          const def = findDefRef.current(src.kind, src.catalogId);
+          const origin = new THREE.Vector3(src.x, 0, src.z);
+          const toMouse = new THREE.Vector3().subVectors(raw, origin);
+          let dist = toMouse.length();
+          let angle = Math.atan2(toMouse.x, toMouse.z);
+          if (!e.shiftKey) {
+            angle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+          }
+          if (e.altKey && def) {
+            const snapUnit = def.w || 1;
+            dist = Math.round(dist / snapUnit) * snapUnit;
+          }
+          dist = Math.max(0.1, dist);
+          const endPt = new THREE.Vector3(
+            origin.x + Math.sin(angle) * dist,
+            0,
+            origin.z + Math.cos(angle) * dist
+          );
+          const n = Math.max(1, lineCountRef.current);
+          threeRef.current.buildArrayGhosts(origin, endPt, n, src, 0);
         }
         return;
       }
@@ -1051,6 +1117,62 @@ export default function BoothPlannerV2() {
     const onUpDrag = () => {
       draggingUid = null;
       draggingWallUid = null;
+      if (draggingWallHandleRef.current?.type === 'array') {
+        const state = threeRef.current._arrayDragState;
+        const existingGroupId = draggingWallHandleRef.current.groupId;
+        itemGroup.children.forEach((c) => { c.visible = true; });
+        if (state && state.n > 0) {
+          const { origin, endPt, n, src } = state;
+          const dir = new THREE.Vector3().subVectors(endPt, origin);
+          const angle = Math.atan2(dir.x, dir.z) - Math.PI / 2;
+          const baseColor = src.color || "#888888";
+          if (existingGroupId) {
+            setItems((prev) => {
+              const groupItems = prev.filter((it) => it.groupId === existingGroupId);
+              const nonGroup = prev.filter((it) => it.groupId !== existingGroupId);
+              const total = n + 1;
+              const newGroup = [];
+              for (let i = 0; i < total; i++) {
+                const t = n === 0 ? 0 : i / n;
+                const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+                const existing = groupItems[i];
+                newGroup.push(existing
+                  ? { ...existing, x: pos.x, z: pos.z, rotY: angle, pivotX: origin.x, pivotZ: origin.z }
+                  : {
+                    uid: `${src.catalogId}_${Date.now()}_arr${i}`,
+                    catalogId: src.catalogId, kind: src.kind,
+                    x: pos.x, z: pos.z, rotY: angle,
+                    color: varyColor(baseColor, i), sockets: {}, groupId: existingGroupId,
+                    pivotX: origin.x, pivotZ: origin.z,
+                  });
+              }
+              return [...nonGroup, ...newGroup];
+            });
+          } else {
+            const groupId = `line_${Date.now()}`;
+            const newItems = [];
+            for (let i = 1; i <= n; i++) {
+              const t = i / n;
+              const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+              newItems.push({
+                uid: `${src.catalogId}_${Date.now()}_arr${i}`,
+                catalogId: src.catalogId, kind: src.kind,
+                x: pos.x, z: pos.z, rotY: angle,
+                color: varyColor(baseColor, i), sockets: {}, groupId,
+                pivotX: origin.x, pivotZ: origin.z,
+              });
+            }
+            threeRef.current.addToGroup(src.uid, groupId, origin.x, origin.z, angle);
+            threeRef.current.commitLineItems(newItems);
+          }
+          threeRef.current._arrayDragState = null;
+          clearGhosts();
+        } else {
+          clearGhosts();
+        }
+        arrayHandleActiveRef.current = false;
+        arrayHandleSourceRef.current = null;
+      }
       if (draggingWallHandleRef.current) {
         draggingWallHandleRef.current = null;
         snapIndicator.visible = false;
@@ -1161,21 +1283,49 @@ export default function BoothPlannerV2() {
         if (w.uid !== uid) return w;
         return endpoint === 'start' ? { ...w, x1: x, z1: z } : { ...w, x2: x, z2: z };
       })),
+      setOriginalRotation: (uid, rotY) => setItems((prev) => prev.map((it) => it.uid === uid ? { ...it, rotY } : it)),
+      addToGroup: (uid, groupId, pivotX, pivotZ, rotY) => setItems((prev) => prev.map((it) => it.uid === uid ? { ...it, groupId, pivotX, pivotZ, rotY } : it)),
       redistributeLineGroup: (groupId, pivotX, pivotZ, endX, endZ) => {
         setItems((prev) => {
           const groupItems = prev.filter((it) => it.groupId === groupId);
           if (groupItems.length < 2) return prev;
           const n = groupItems.length;
           const angle = Math.atan2(endX - pivotX, endZ - pivotZ);
+          const origin = new THREE.Vector3(pivotX, 0, pivotZ);
+          const end = new THREE.Vector3(endX, 0, endZ);
           return prev.map((it) => {
             if (it.groupId !== groupId) return it;
             const idx = groupItems.indexOf(it);
-            const t = n === 1 ? 0 : idx / (n - 1);
-            const x = pivotX + (endX - pivotX) * t;
-            const z = pivotZ + (endZ - pivotZ) * t;
-            return { ...it, x, z, rotY: angle, pivotX, pivotZ };
+            if (idx === 0) return { ...it, rotY: angle }; // original stays at pivot, just rotates
+            const t = idx / (n - 1);
+            const pos = new THREE.Vector3().copy(origin).lerp(end, t);
+            return { ...it, x: pos.x, z: pos.z, rotY: angle, pivotX, pivotZ };
           });
         });
+      },
+      buildArrayGhosts: (origin, endPt, n, src, angleOffset = 0) => {
+        clearGhosts();
+        const def = findDefRef.current(src.kind, src.catalogId);
+        if (!def) return;
+        const dir = new THREE.Vector3().subVectors(endPt, origin);
+        const baseAngle = Math.atan2(dir.x, dir.z) - Math.PI / 2;
+        const origContainer = itemGroup.children.find((c) => c.userData.uid === src.uid);
+        if (origContainer) origContainer.rotation.y = baseAngle;
+        const makeGhost = (pos, colorIdx) => {
+          const geo = new THREE.BoxGeometry(def.w || 1, def.h || 1, def.d || 1);
+          const mat = new THREE.MeshStandardMaterial({ color: varyColor(src.color || def.color || "#888888", colorIdx), roughness: 0.45, metalness: 0.15, transparent: true, opacity: 0.45 });
+          const ghost = new THREE.Mesh(geo, mat);
+          ghost.position.set(pos.x, (def.h || 1) / 2, pos.z);
+          ghost.rotation.y = baseAngle;
+          ghostGroup.add(ghost);
+        };
+        makeGhost(origin, 0);
+        for (let i = 1; i <= n; i++) {
+          const t = i / n;
+          const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+          makeGhost(pos, i);
+        }
+        threeRef.current._arrayDragState = { origin, endPt, n, src, angleOffset: 0 };
       },
       clearWallGhost: () => {
         const wg = threeRef.current.wallGhost;
@@ -1247,13 +1397,13 @@ export default function BoothPlannerV2() {
     return () => { scene.remove(mesh); mat.dispose(); geo.dispose(); };
   }, [floorPlan]);
 
-  // ===================== Sync wall handles + line group handles =====================
+  // ===================== Sync wall handles + array handles =====================
   useEffect(() => {
     const { handleGroup } = threeRef.current;
     if (!handleGroup) return;
     while (handleGroup.children.length) handleGroup.children.pop();
 
-    // Wall handles
+    // Wall handles (orange)
     if (selectedWallUid) {
       const wall = walls.find((w) => w.uid === selectedWallUid);
       if (wall) {
@@ -1273,36 +1423,79 @@ export default function BoothPlannerV2() {
       }
     }
 
-    // Line group handles — cuando hay grupo completo seleccionado
+    // Single object — "+" array expand handle (green)
+    if (selectedUids.length === 1 && !selectedWallUid) {
+      const it = items.find((i) => i.uid === selectedUids[0]);
+      const def = it && findDef(it.kind, it.catalogId);
+      if (it && def && it.kind === 'model') {
+        // posición de la esfera: +X local del objeto (a su derecha según su rotación)
+        const offset = (def.w || 1) / 2 + 0.3;
+        const sx = it.x + Math.sin(it.rotY + Math.PI / 2) * offset;
+        const sz = it.z + Math.cos(it.rotY + Math.PI / 2) * offset;
+
+        const group = new THREE.Group();
+        group.position.set(sx, 0.2, sz);
+        group.renderOrder = 999;
+        group.userData.isArrayHandle = true;
+        group.userData.sourceUid = it.uid;
+
+        // Esfera base
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(0.16, 16, 16),
+          new THREE.MeshBasicMaterial({ color: 0x4ade80, depthTest: false })
+        );
+        group.add(sphere);
+
+        // "+" símbolo encima (dos cilindros cruzados)
+        const barMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+        const h = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.03, 0.03), barMat);
+        const v = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.14), barMat);
+        h.position.y = 0.17; v.position.y = 0.17;
+        group.add(h); group.add(v);
+
+        handleGroup.add(group);
+      }
+    }
+
+    // Group handles — two cyan spheres at extremes for re-editing
     if (selectedUids.length > 1) {
       const selItems = items.filter((it) => selectedUids.includes(it.uid));
       const allSameGroup = selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
       if (allSameGroup && selItems[0].pivotX != null) {
-        // ordenar por posición para encontrar el primer y último punto
         const sorted = [...selItems].sort((a, b) => {
           const da = Math.hypot(a.x - selItems[0].pivotX, a.z - (selItems[0].pivotZ ?? 0));
           const db = Math.hypot(b.x - selItems[0].pivotX, b.z - (selItems[0].pivotZ ?? 0));
           return da - db;
         });
         const first = sorted[0], last = sorted[sorted.length - 1];
-        const makeLineHandle = (x, z, role) => {
-          const geo = new THREE.SphereGeometry(0.14, 16, 16);
-          const mat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false });
-          const sphere = new THREE.Mesh(geo, mat);
-          sphere.position.set(x, 0.2, z);
-          sphere.renderOrder = 999;
-          sphere.userData.isLineHandle = true;
-          sphere.userData.groupId = selItems[0].groupId;
-          sphere.userData.role = role; // 'start' | 'end'
-          sphere.userData.pivotX = selItems[0].pivotX;
-          sphere.userData.pivotZ = selItems[0].pivotZ ?? 0;
-          return sphere;
+        const makeGroupHandle = (x, z, role, visible = true) => {
+          const grp = new THREE.Group();
+          grp.position.set(x, 0.22, z);
+          grp.renderOrder = 999;
+          grp.userData.isLineHandle = true;
+          grp.userData.groupId = selItems[0].groupId;
+          grp.userData.role = role;
+          grp.userData.pivotX = selItems[0].pivotX;
+          grp.userData.pivotZ = selItems[0].pivotZ ?? 0;
+          const sph = new THREE.Mesh(
+            new THREE.SphereGeometry(0.14, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false })
+          );
+          grp.add(sph);
+          // "+" en los handles de grupo también
+          const bm = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+          const hb = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.03, 0.03), bm);
+          const vb = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.12), bm);
+          hb.position.y = 0.15; vb.position.y = 0.15;
+          grp.add(hb); grp.add(vb);
+          grp.children.forEach((c) => { c.visible = visible; });
+          return grp;
         };
-        handleGroup.add(makeLineHandle(first.x, first.z, 'start'));
-        handleGroup.add(makeLineHandle(last.x, last.z, 'end'));
+        handleGroup.add(makeGroupHandle(first.x, first.z, 'start', false));
+        handleGroup.add(makeGroupHandle(last.x, last.z, 'end', true));
       }
     }
-  }, [selectedWallUid, selectedUids, walls, items]);
+  }, [selectedWallUid, selectedUids, walls, items, findDef]);
 
   // ===================== Sync walls -> meshes =====================
   useEffect(() => {
@@ -2395,10 +2588,7 @@ export default function BoothPlannerV2() {
                               title="Color"
                               style={{ width: 24, height: 24, borderRadius: 6, border: "1px solid #2a3050", padding: 1, cursor: "pointer", flexShrink: 0, background: "none" }}
                             />
-                            <button disabled={!libraryReady} onClick={() => setPendingLineDef({ def: c, kind: "model" })}
-                              style={{ flex: 1, background: "#5b4bff", border: "none", borderRadius: 6, color: "#fff", padding: "5px 0", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
-                              Array
-                            </button>
+                            <span style={{ fontSize: 10, color: "#334155", fontStyle: "italic" }}>Drag to place · select + drag ✚ to array</span>
                           </div>
                         </div>
                       </div>
