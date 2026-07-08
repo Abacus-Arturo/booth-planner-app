@@ -2971,156 +2971,185 @@ export default function BoothPlannerV2() {
           );
         })() : selectedItem && selectedDef ? (
           <>
-          <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{selectedDef.name}</h3>
-          {selectedUids.length > 1 && (
-            <div style={{ fontSize: 11, color: "#c4622d", marginBottom: 8 }}>
-              {selectedUids.length} objects selected · ← → rotate all
+          {/* Header */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+            <div style={{ width: 3, height: 24, background: "#5b4bff", borderRadius: 2, flexShrink: 0 }} />
+            <div>
+              <h3 style={{ fontSize: 14, fontWeight: 700, margin: 0, color: "#e2e8f0" }}>{selectedDef.name}</h3>
+              {selectedUids.length > 1 && <div style={{ fontSize: 10, color: "#c4622d", marginTop: 2 }}>{selectedUids.length} objects selected</div>}
             </div>
-          )}
+          </div>
+
+          {/* Group card */}
           {selectedItem.groupId && (
-            <div style={{ background: "#22242a", border: "1px solid #33363d", borderRadius: 6, padding: 8, marginBottom: 8 }}>
-              <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 6 }}>
-                {selectedUids.length > 1 ? "Whole group selected" : "Individual piece (double-click) — still part of its group"}
+            <div style={{ background: "#0e1a14", border: "1px solid #1a3a28", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                <span style={{ fontSize: 11, color: "#4ade80", fontWeight: 600 }}>{selectedUids.length > 1 ? "Whole group selected" : "Part of a group"}</span>
               </div>
-              <div style={{ fontSize: 10, color: "#888", marginBottom: 6 }}>
-                Normal click on any piece = selects the whole group · Double-click = just that piece
+              <div style={{ fontSize: 10, color: "#64748b", marginBottom: 8, lineHeight: 1.5 }}>
+                {selectedUids.length > 1 ? "← → rotates around pivot · Shift+← → rotates each in place" : "Click any piece = select group · Double-click = this piece only"}
               </div>
-              <button
-                onClick={() => {
-                  setItems((prev) => prev.map((it) => (selectedUids.includes(it.uid) ? { ...it, groupId: null } : it)));
-                }}
-                style={{ ...btnStyle, width: "100%" }}
-              >
+              <button onClick={() => setItems((prev) => prev.map((it) => selectedUids.includes(it.uid) ? { ...it, groupId: null } : it))}
+                style={{ width: "100%", background: "#13162a", border: "1px solid #1e2035", borderRadius: 7, color: "#94a3b8", padding: "6px", fontSize: 11, cursor: "pointer", fontWeight: 500 }}>
                 Ungroup {selectedUids.length > 1 ? "selection" : "this piece"}
               </button>
             </div>
           )}
-          {selectedUids.length === 1 ? (
-            <>
-              <label style={labelStyle}>Position ({UNITS[unit].label})</label>
-              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                <input type="number" step="0.1" value={fmt(metersTo(selectedItem.x, unit))}
-                  onChange={(e) => updateSelected({ x: toMeters(parseFloat(e.target.value) || 0, unit) })} style={inputStyle} placeholder="x" />
-                <input type="number" step="0.1" value={fmt(metersTo(selectedItem.z, unit))}
-                  onChange={(e) => updateSelected({ z: toMeters(parseFloat(e.target.value) || 0, unit) })} style={inputStyle} placeholder="z" />
+
+          {/* Position */}
+          {selectedUids.length === 1 && (
+            <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Position ({UNITS[unit].label})</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["X", "x"], ["Z", "z"]].map(([label, key]) => (
+                  <div key={key} style={{ flex: 1 }}>
+                    <div style={{ fontSize: 9, color: "#475569", marginBottom: 3 }}>{label}</div>
+                    <input type="number" step="0.1" value={fmt(metersTo(selectedItem[key], unit))}
+                      onChange={(e) => updateSelected({ [key]: toMeters(parseFloat(e.target.value) || 0, unit) })} style={inputStyle} />
+                  </div>
+                ))}
               </div>
-            </>
-          ) : (
-            <div style={{ fontSize: 11, color: "#888", marginBottom: 8 }}>
-              x: {fmt(metersTo(selectedItem.x, unit))}{UNITS[unit].label} · z: {fmt(metersTo(selectedItem.z, unit))}{UNITS[unit].label}
             </div>
           )}
 
+          {/* Size — primitives only */}
           {selectedItem.kind === "primitive" && selectedUids.length === 1 && (
-            <>
-              <label style={labelStyle}>Size ({UNITS[unit].label})</label>
-              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem.w ?? selectedDef.w, unit))}
-                  onChange={(e) => updateSelected({ w: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="width" />
-                <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem.d ?? selectedDef.d, unit))}
-                  onChange={(e) => updateSelected({ d: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="depth" />
-                <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem.h ?? selectedDef.h, unit))}
-                  onChange={(e) => updateSelected({ h: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} placeholder="height" />
+            <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Size ({UNITS[unit].label})</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["W", "w", selectedDef.w], ["D", "d", selectedDef.d], ["H", "h", selectedDef.h]].map(([label, key, def]) => (
+                  <div key={key} style={{ flex: 1 }}>
+                    <div style={{ fontSize: 9, color: "#475569", marginBottom: 3 }}>{label}</div>
+                    <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem[key] ?? def, unit))}
+                      onChange={(e) => updateSelected({ [key]: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} />
+                  </div>
+                ))}
               </div>
-            </>
+            </div>
           )}
 
+          {/* Prop height */}
           {selectedItem.kind === "prop" && selectedUids.length === 1 && (
-            <>
+            <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
               {selectedItem.parentUid ? (
-                <div style={{ background: "#22242a", border: "1px solid #33363d", borderRadius: 6, padding: 8, marginBottom: 12 }}>
-                  <div style={{ fontSize: 11, color: "#9ad6b4", marginBottom: 6 }}>
-                    Attached to: {(() => { const pIt = items.find((i) => i.uid === selectedItem.parentUid); const pDef = pIt && findDef(pIt.kind, pIt.catalogId); return pDef ? pDef.name : "object"; })()}
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                    <span style={{ fontSize: 10, color: "#4ade80", fontWeight: 600 }}>
+                      Attached to {(() => { const p = items.find(i => i.uid === selectedItem.parentUid); const d = p && findDef(p.kind, p.catalogId); return d ? d.name : "object"; })()}
+                    </span>
                   </div>
-                  <label style={labelStyle}>Height ({UNITS[unit].label})</label>
-                  <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-                    <input type="number" step="0.05" value={fmt(metersTo(selectedItem.localOffset.y, unit))}
-                      onChange={(e) => updateSelected({ localOffset: { ...selectedItem.localOffset, y: toMeters(parseFloat(e.target.value) || 0, unit) } })}
-                      style={inputStyle} />
-                  </div>
-                  <button
-                    onClick={() => updateSelected({ parentUid: null, localOffset: null, yOffset: selectedItem.localOffset.y })}
-                    style={{ ...btnStyle, width: "100%" }}
-                  >
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 6 }}>Height ({UNITS[unit].label})</div>
+                  <input type="number" step="0.05" value={fmt(metersTo(selectedItem.localOffset.y, unit))}
+                    onChange={(e) => updateSelected({ localOffset: { ...selectedItem.localOffset, y: toMeters(parseFloat(e.target.value) || 0, unit) } })}
+                    style={{ ...inputStyle, marginBottom: 8 }} />
+                  <button onClick={() => updateSelected({ parentUid: null, localOffset: null, yOffset: selectedItem.localOffset.y })}
+                    style={{ width: "100%", background: "#13162a", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "6px", fontSize: 11, cursor: "pointer" }}>
                     Detach
                   </button>
-                </div>
+                </>
               ) : (
                 <>
-                  <label style={labelStyle}>Free height ({UNITS[unit].label})</label>
-                  <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-                    <input type="number" step="0.05" value={fmt(metersTo(selectedItem.yOffset || 0, unit))}
-                      onChange={(e) => updateSelected({ yOffset: toMeters(parseFloat(e.target.value) || 0, unit) })} style={inputStyle} />
-                  </div>
-                  <div style={{ fontSize: 10, color: "#666", marginBottom: 12 }}>Drag it onto another object to attach it</div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 6 }}>Height ({UNITS[unit].label})</div>
+                  <input type="number" step="0.05" value={fmt(metersTo(selectedItem.yOffset || 0, unit))}
+                    onChange={(e) => updateSelected({ yOffset: toMeters(parseFloat(e.target.value) || 0, unit) })} style={{ ...inputStyle, marginBottom: 6 }} />
+                  <div style={{ fontSize: 10, color: "#475569" }}>Drag onto another object to attach</div>
                 </>
               )}
-            </>
-          )}
-
-          <label style={labelStyle}>Rotation</label>
-          <div style={{ fontSize: 11, color: "#777", marginBottom: 4 }}>← → = 15° · Shift + ← → = {isWholeGroupSelected ? "cada objeto" : "1°"}</div>
-          {selectedUids.length === 1 && (
-            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
-              <input
-                type="number" step="1"
-                value={Math.round(((selectedItem.rotY * 180 / Math.PI) % 360 + 360) % 360)}
-                onChange={(e) => updateSelected({ rotY: (parseFloat(e.target.value) || 0) * Math.PI / 180 })}
-                style={inputStyle}
-              />
-              <span style={{ fontSize: 12, color: "#888" }}>°</span>
             </div>
           )}
-          <label style={labelStyle}>Color</label>
-          <input type="color" value={selectedItem.color} onChange={(e) => updateColor(e.target.value)} style={{ width: "100%", height: 28, marginBottom: 12, border: "none", borderRadius: 6 }} />
 
+          {/* Rotation */}
+          <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Rotation</div>
+            {selectedUids.length === 1 ? (
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input type="number" step="1"
+                  value={Math.round(((selectedItem.rotY * 180 / Math.PI) % 360 + 360) % 360)}
+                  onChange={(e) => updateSelected({ rotY: (parseFloat(e.target.value) || 0) * Math.PI / 180 })}
+                  style={{ ...inputStyle, flex: 1 }} />
+                <span style={{ fontSize: 11, color: "#475569" }}>°</span>
+                <button onClick={rotateSelected} style={{ background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "6px 10px", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>+90°</button>
+              </div>
+            ) : (
+              <div style={{ fontSize: 10, color: "#475569" }}>← → pivot · Shift+← → each in place</div>
+            )}
+          </div>
+
+          {/* Color */}
+          <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Color</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="color" value={selectedItem.color} onChange={(e) => updateColor(e.target.value)}
+                style={{ width: 40, height: 40, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
+              <div style={{ flex: 1, height: 40, background: selectedItem.color, borderRadius: 8, border: "1px solid #1e2035" }} />
+            </div>
+          </div>
+
+          {/* Accessories */}
           {selectedItem.kind === "model" && selectedDef.sockets && selectedDef.sockets.length > 0 && (
-            <>
-              <label style={labelStyle}>Accessories</label>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Accessories</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {selectedDef.sockets.map((s) => {
                   const sName = getSocketName(s);
                   const repeatable = isRepeatableSocket(sName);
                   const cfg = selectedItem.sockets && selectedItem.sockets[sName];
+                  const isOn = repeatable ? !!(cfg && cfg.enabled) : !!cfg;
+                  const isLamp = sName.includes("lamp");
+                  const accentColor = isLamp ? "#f59e0b" : "#818cf8";
+                  const accentBg = isLamp ? "#1a1600" : "#0e0d1f";
+                  const accentBorder = isLamp ? "#f59e0b33" : "#5b4bff44";
+                  const icon = isLamp
+                    ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={isOn ? accentColor : "#475569"} strokeWidth="2"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.3 6H8.3C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/></svg>
+                    : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={isOn ? accentColor : "#475569"} strokeWidth="2"><rect x="2" y="3" width="20" height="4" rx="1"/><rect x="2" y="10" width="20" height="4" rx="1"/><rect x="2" y="17" width="20" height="4" rx="1"/></svg>;
                   return (
-                    <div key={sName}>
-                      <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                        <input type="checkbox" checked={repeatable ? !!(cfg && cfg.enabled) : !!cfg} onChange={() => toggleSocket(sName)} />
-                        {sName.replace("socket_", "")}
-                      </label>
-                      {repeatable && cfg && cfg.enabled && (
-                        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4, marginLeft: 20 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Count</span>
-                            <button onClick={() => updateSocketConfig(sName, { count: Math.max(1, cfg.count - 1) })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>-</button>
-                            <span style={{ fontSize: 12, width: 20, textAlign: "center" }}>{cfg.count}</span>
-                            <button onClick={() => updateSocketConfig(sName, { count: cfg.count + 1 })} style={{ ...btnStyle, flex: "0 0 auto", padding: "2px 8px" }}>+</button>
+                    <div key={sName} style={{ borderRadius: 10, border: `1.5px solid ${isOn ? accentBorder : "#1e2035"}`, background: isOn ? accentBg : "#13162a", overflow: "hidden" }}>
+                      <div onClick={() => toggleSocket(sName)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "pointer" }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 8, background: isOn ? `${accentColor}22` : "#1e2035", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                          {icon}
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: isOn ? accentColor : "#475569" }}>
+                            {isLamp ? "Lamp" : "Shelves"}
                           </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Spacing</span>
+                          <div style={{ fontSize: 10, color: isOn ? `${accentColor}99` : "#334155" }}>
+                            {isOn && repeatable && cfg ? `${cfg.count} shelves · ${fmt(metersTo(cfg.spacing, unit))}${UNITS[unit].label} spacing` : isLamp ? "Overhead spotlight" : "Display shelving"}
+                          </div>
+                        </div>
+                        <div style={{ width: 36, height: 20, background: isOn ? accentColor : "#1e2035", border: isOn ? "none" : "1px solid #2a2f4a", borderRadius: 10, position: "relative", flexShrink: 0 }}>
+                          <div style={{ width: 16, height: 16, background: isOn ? "#fff" : "#475569", borderRadius: "50%", position: "absolute", top: 2, left: isOn ? 18 : 2 }} />
+                        </div>
+                      </div>
+                      {repeatable && isOn && cfg && (
+                        <div style={{ borderTop: "1px solid #1e2035", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 10, color: "#64748b", width: 72 }}>Count</span>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                              <button onClick={() => updateSocketConfig(sName, { count: Math.max(1, cfg.count - 1) })}
+                                style={{ width: 26, height: 26, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 6, color: "#e2e8f0", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+                              <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", minWidth: 20, textAlign: "center" }}>{cfg.count}</span>
+                              <button onClick={() => updateSocketConfig(sName, { count: cfg.count + 1 })}
+                                style={{ width: 26, height: 26, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 6, color: "#e2e8f0", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 10, color: "#64748b", width: 72 }}>Spacing</span>
                             <input type="number" min="0.05" step="0.05" value={fmt(metersTo(cfg.spacing, unit))}
                               onChange={(e) => updateSocketConfig(sName, { spacing: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })}
-                              style={{ ...inputStyle, padding: "2px 6px" }} />
+                              style={{ ...inputStyle, flex: 1 }} />
+                            <span style={{ fontSize: 10, color: "#475569" }}>{UNITS[unit].label}</span>
                           </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ fontSize: 10, color: "#888", width: 60 }}>Base height</span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 10, color: "#64748b", width: 72 }}>Base height</span>
                             <input type="number" min="0" step="0.05" value={fmt(metersTo(cfg.baseHeight, unit))}
                               onChange={(e) => updateSocketConfig(sName, { baseHeight: Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit)) })}
-                              style={{ ...inputStyle, padding: "2px 6px" }} />
+                              style={{ ...inputStyle, flex: 1 }} />
+                            <span style={{ fontSize: 10, color: "#475569" }}>{UNITS[unit].label}</span>
                           </div>
-                          {/* Apply to all — copia esta config a todos los del mismo modelo */}
-                          <button
-                            onClick={() => {
-                              const socketConfig = selectedItem.sockets[sName];
-                              if (!socketConfig) return;
-                              setItems((prev) => prev.map((it) =>
-                                it.uid !== selectedItem.uid && it.catalogId === selectedItem.catalogId
-                                  ? { ...it, sockets: { ...it.sockets, [sName]: { ...socketConfig } } }
-                                  : it
-                              ));
-                            }}
-                            style={{ ...btnStyle, marginTop: 4, fontSize: 10, padding: "3px 0" }}
-                          >
+                          <button onClick={() => { const sc = selectedItem.sockets[sName]; if (!sc) return; setItems((prev) => prev.map((it) => it.uid !== selectedItem.uid && it.catalogId === selectedItem.catalogId ? { ...it, sockets: { ...it.sockets, [sName]: { ...sc } } } : it)); }}
+                            style={{ width: "100%", background: "#13162a", border: `1px solid ${accentColor}33`, borderRadius: 7, color: accentColor, fontSize: 10, padding: "6px", cursor: "pointer", fontWeight: 600 }}>
                             Apply to all {selectedDef.name}
                           </button>
                         </div>
@@ -3129,26 +3158,37 @@ export default function BoothPlannerV2() {
                   );
                 })}
               </div>
-            </>
-          )}
-
-          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <button onClick={rotateSelected} style={btnStyle}>Rotate 90°</button>
-            <button onClick={duplicateSelected} style={btnStyle}>Duplicate</button>
-            <button onClick={() => setShowReplaceMenu((s) => !s)} style={btnStyle}>Replace</button>
-          </div>
-          <div style={{ fontSize: 10, color: "#666", marginBottom: 6 }}>Shortcut: Ctrl/Cmd + D</div>
-          {showReplaceMenu && (
-            <div style={{ background: "#22242a", border: "1px solid #33363d", borderRadius: 6, padding: 6, marginBottom: 6, maxHeight: 140, overflowY: "auto" }}>
-              {[...catalog.map((c) => ({ def: c, kind: "model" })), ...PRIMITIVES.map((p) => ({ def: p, kind: "primitive" }))].map(({ def, kind }) => (
-                <div key={def.id} onClick={() => replaceSelected(def, kind)} style={{ fontSize: 12, padding: "4px 6px", cursor: "pointer", borderRadius: 4 }}>
-                  {def.name}
-                </div>
-              ))}
             </div>
           )}
-          <button onClick={deleteSelected} style={{ ...btnStyle, background: "#5a2424", width: "100%" }}>Delete object</button>
+
+          {/* Actions */}
+          <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Actions</div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+              <button onClick={rotateSelected} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>↻ 90°</button>
+              <button onClick={duplicateSelected} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>Duplicate</button>
+              <button onClick={() => setShowReplaceMenu((s) => !s)} style={{ flex: 1, background: showReplaceMenu ? "#5b4bff" : "#1e2035", border: `1px solid ${showReplaceMenu ? "#5b4bff" : "#2a2f4a"}`, borderRadius: 7, color: showReplaceMenu ? "#fff" : "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>Replace</button>
+            </div>
+            {showReplaceMenu && (
+              <div style={{ background: "#0d0f18", border: "1px solid #1e2035", borderRadius: 8, padding: 6, marginBottom: 6, maxHeight: 140, overflowY: "auto" }}>
+                {[...catalog.map((c) => ({ def: c, kind: "model" })), ...PRIMITIVES.map((p) => ({ def: p, kind: "primitive" }))].map(({ def, kind }) => (
+                  <div key={def.id} onClick={() => replaceSelected(def, kind)}
+                    style={{ fontSize: 11, padding: "5px 8px", cursor: "pointer", borderRadius: 6, color: "#94a3b8" }}
+                    onMouseEnter={e => e.currentTarget.style.background = "#1e2035"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                    {def.name}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 9, color: "#334155", marginBottom: 8 }}>Ctrl/Cmd + D to duplicate</div>
+            <button onClick={deleteSelected}
+              style={{ width: "100%", background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 7, color: "#f87171", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
+              Delete
+            </button>
+          </div>
           </>
+
         ) : (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 8, opacity: 0.35 }}>
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
