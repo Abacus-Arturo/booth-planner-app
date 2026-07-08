@@ -935,7 +935,11 @@ export default function BoothPlannerV2() {
         dragOffsetsRef.current = {};
         groupUidsForDrag.forEach((uid) => {
           const it = itemsRef.current.find((i) => i.uid === uid);
-          if (it) dragOffsetsRef.current[uid] = { dx: it.x - startPt.x, dz: it.z - startPt.z };
+          if (it) dragOffsetsRef.current[uid] = {
+            dx: it.x - startPt.x, dz: it.z - startPt.z,
+            pivotDx: it.pivotX != null ? it.pivotX - startPt.x : null,
+            pivotDz: it.pivotZ != null ? it.pivotZ - startPt.z : null,
+          };
         });
       } else {
         threeRef.current.setSelected(null);
@@ -1149,7 +1153,7 @@ export default function BoothPlannerV2() {
                     uid: `${src.catalogId}_${Date.now()}_arr${i}`,
                     catalogId: src.catalogId, kind: src.kind,
                     x: pos.x, z: pos.z, rotY: angle,
-                    color: varyColor(baseColor, i), sockets: {}, groupId: existingGroupId,
+                    color: varyColor(baseColor, i), sockets: { ...src.sockets }, groupId: existingGroupId,
                     pivotX: origin.x, pivotZ: origin.z,
                   });
               }
@@ -1165,7 +1169,7 @@ export default function BoothPlannerV2() {
                 uid: `${src.catalogId}_${Date.now()}_arr${i}`,
                 catalogId: src.catalogId, kind: src.kind,
                 x: pos.x, z: pos.z, rotY: angle,
-                color: varyColor(baseColor, i), sockets: {}, groupId,
+                color: varyColor(baseColor, i), sockets: { ...src.sockets }, groupId,
                 pivotX: origin.x, pivotZ: origin.z,
               });
             }
@@ -1247,7 +1251,10 @@ export default function BoothPlannerV2() {
       moveItem: (uid, x, z) => setItems((prev) => prev.map((it) => (it.uid === uid ? { ...it, x, z } : it))),
       setSelectedGroup: (uids) => setSelectedUids(uids),
       moveGroup: (offsets, px, pz) => setItems((prev) => prev.map((it) => (
-        offsets[it.uid] ? { ...it, x: px + offsets[it.uid].dx, z: pz + offsets[it.uid].dz } : it
+        offsets[it.uid] ? { ...it, x: px + offsets[it.uid].dx, z: pz + offsets[it.uid].dz,
+          pivotX: it.pivotX != null ? px + offsets[it.uid].pivotDx : it.pivotX,
+          pivotZ: it.pivotZ != null ? pz + offsets[it.uid].pivotDz : it.pivotZ,
+        } : it
       ))),
       attachProp: (uid, parentUid, localOffset) => setItems((prev) => prev.map((it) => (
         it.uid === uid ? { ...it, parentUid, localOffset } : it
@@ -1956,9 +1963,10 @@ export default function BoothPlannerV2() {
               // Shift = cada objeto rota en su propio origen
               return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
             } else {
-              // Normal = todo el grupo rota alrededor del pivote
-              const pivotX = selItems[0].pivotX ?? selItems[0].x;
-              const pivotZ = selItems[0].pivotZ ?? selItems[0].z;
+              // Normal = todo el grupo rota alrededor del primer objeto (pivote guardado)
+              const pivotItem = selItems.find((it) => it.pivotX != null) || selItems[0];
+              const pivotX = pivotItem.pivotX ?? pivotItem.x;
+              const pivotZ = pivotItem.pivotZ ?? pivotItem.z;
               const axis = new THREE.Vector3(0, 1, 0);
               return prev.map((it) => {
                 if (!selectedUids.includes(it.uid)) return it;
@@ -3122,6 +3130,14 @@ export default function BoothPlannerV2() {
                           <div style={{ width: 16, height: 16, background: isOn ? "#fff" : "#475569", borderRadius: "50%", position: "absolute", top: 2, left: isOn ? 18 : 2 }} />
                         </div>
                       </div>
+                      {isLamp && isOn && (
+                        <div style={{ borderTop: "1px solid #1e2035", padding: "8px 12px" }}>
+                          <button onClick={() => { const sc = selectedItem.sockets[sName]; if (!sc) return; setItems((prev) => prev.map((it) => it.uid !== selectedItem.uid && it.catalogId === selectedItem.catalogId ? { ...it, sockets: { ...it.sockets, [sName]: sc } } : it)); }}
+                            style={{ width: "100%", background: "#13162a", border: `1px solid ${accentColor}33`, borderRadius: 7, color: accentColor, fontSize: 10, padding: "6px", cursor: "pointer", fontWeight: 600 }}>
+                            Apply to all {selectedDef.name}
+                          </button>
+                        </div>
+                      )}
                       {repeatable && isOn && cfg && (
                         <div style={{ borderTop: "1px solid #1e2035", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
