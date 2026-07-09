@@ -389,6 +389,8 @@ export default function BoothPlannerV2() {
   const mountRef = useRef(null);
   const threeRef = useRef({});
   const [unit, setUnit] = useState("m");
+  const unitRef = useRef("m");
+  useEffect(() => { unitRef.current = unit; }, [unit]);
   const [floorW, setFloorW] = useState(10);
   const [floorD, setFloorD] = useState(8);
   const [showFileMenu, setShowFileMenu] = useState(false);
@@ -465,8 +467,25 @@ export default function BoothPlannerV2() {
   const [showReplaceMenu, setShowReplaceMenu] = useState(false);
   const [pendingLineDef, setPendingLineDef] = useState(null); // {def, kind}
   const [wallToolActive, setWallToolActive] = useState(false);
+  const [floorDark, setFloorDark] = useState(false);
+  const floorColorRef = useRef("#e9e9e9");
+  useEffect(() => { floorColorRef.current = floorColor; }, [floorColor]);
+  const [measureToolActive, setMeasureToolActive] = useState(false);
+  const measureToolActiveRef = useRef(false);
+  useEffect(() => { measureToolActiveRef.current = measureToolActive; }, [measureToolActive]);
+  const measureStateRef = useRef({ active: false, start: null, measures: [] });
   const [wallConfig, setWallConfig] = useState({ height: 2.4, glassRatio: 0, thickness: 0.1, color: "#cccccc" });
   const [layerVisibility, setLayerVisibility] = useState({ models: true, primitives: true, props: true, walls: true });
+  const [hiddenCatalogIds, setHiddenCatalogIds] = useState(new Set());
+  const [appSettings, setAppSettings] = useState({ animations: true });
+  const [showSettings, setShowSettings] = useState(false);
+  const appSettingsRef = useRef(appSettings);
+  useEffect(() => { appSettingsRef.current = appSettings; }, [appSettings]);
+  const toggleCatalogVisibility = (id) => setHiddenCatalogIds((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
   const wallStateRef = useRef({ active: false, start: null, end: null });
   const wallConfigRef = useRef(wallConfig);
   useEffect(() => { wallConfigRef.current = wallConfig; }, [wallConfig]);
@@ -731,6 +750,48 @@ export default function BoothPlannerV2() {
     const ghostGroup = new THREE.Group();
     scene.add(ghostGroup);
 
+    // Measure tool
+    const measureGroup = new THREE.Group();
+    scene.add(measureGroup);
+    // preview line while drawing
+    const measureLineMat = new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.15, gapSize: 0.08, depthTest: false });
+    const measureLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+    const measurePreviewLine = new THREE.Line(measureLineGeo, measureLineMat);
+    measurePreviewLine.computeLineDistances();
+    measurePreviewLine.visible = false;
+    measurePreviewLine.renderOrder = 997;
+    scene.add(measurePreviewLine);
+    // preview label sprite
+    const makeMeasureLabel = (text) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256; canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = 'rgba(13,15,24,0.85)';
+      ctx.roundRect(4, 4, 248, 56, 10);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 28px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, 128, 32);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(1.2, 0.3, 1);
+      sprite.renderOrder = 997;
+      return sprite;
+    };
+    const measurePreviewLabel = makeMeasureLabel('0.00m');
+    measurePreviewLabel.visible = false;
+    scene.add(measurePreviewLabel);
+    // start dot
+    const measureStartDot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false })
+    );
+    measureStartDot.visible = false;
+    measureStartDot.renderOrder = 997;
+    scene.add(measureStartDot);
+
     // Hover indicator — esferita que aparece arriba del objeto bajo el cursor
     const hoverSphereMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false, transparent: true, opacity: 0.9 });
     const hoverSphere = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), hoverSphereMat);
@@ -801,9 +862,76 @@ export default function BoothPlannerV2() {
     let dragArmed = false; // solo cuenta como "arrastre" real una vez que pasas el umbral de píxeles
     let dragStartScreenX = 0, dragStartScreenY = 0;
     const DRAG_THRESHOLD_PX = 5;
+    // Measure tool helpers
+    const formatDist = (meters) => {
+      const u = unitRef.current || 'm';
+      if (u === 'ft') return `${(meters * 3.28084).toFixed(2)}ft`;
+      if (u === 'in') return `${(meters * 39.3701).toFixed(1)}in`;
+      return `${meters.toFixed(2)}m`;
+    };
+    const snapMeasurePoint = (raw) => {
+      const SNAP_DIST = 0.3;
+      let best = raw.clone(), bestD = SNAP_DIST;
+      // snap to object corners
+      itemGroup.children.forEach((c) => {
+        if (!c.visible) return;
+        const box = new THREE.Box3().setFromObject(c);
+        const corners = [
+          new THREE.Vector3(box.min.x, 0, box.min.z),
+          new THREE.Vector3(box.max.x, 0, box.min.z),
+          new THREE.Vector3(box.min.x, 0, box.max.z),
+          new THREE.Vector3(box.max.x, 0, box.max.z),
+        ];
+        corners.forEach((corner) => {
+          const d = raw.distanceTo(corner);
+          if (d < bestD) { best = corner; bestD = d; }
+        });
+      });
+      // snap to wall endpoints
+      wallsRef.current.forEach((w) => {
+        [new THREE.Vector3(w.x1, 0, w.z1), new THREE.Vector3(w.x2, 0, w.z2)].forEach((p) => {
+          const d = raw.distanceTo(p);
+          if (d < bestD) { best = p; bestD = d; }
+        });
+      });
+      return best;
+    };
+
     const onDownSelect = (e) => {
       if (e.button !== 0) return;
       // ---- Wall tool flow ----
+      if (measureToolActiveRef.current) {
+        const raw = groundPoint(e.clientX, e.clientY);
+        const pt = e.shiftKey ? raw : snapMeasurePoint(raw);
+        const ms = measureStateRef.current;
+        const { measurePreviewLine, measurePreviewLabel, measureStartDot, measureGroup, makeMeasureLabel: mkLabel } = threeRef.current;
+        if (!ms.start) {
+          ms.start = pt.clone();
+          measureStartDot.position.copy(pt).setY(0.05);
+          measureStartDot.visible = true;
+        } else {
+          const dist = ms.start.distanceTo(pt);
+          if (dist > 0.05) {
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([ms.start.clone(), pt.clone()]);
+            const line = new THREE.Line(lineGeo, new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.15, gapSize: 0.08, depthTest: false }));
+            line.computeLineDistances(); line.renderOrder = 997;
+            measureGroup.add(line);
+            [ms.start, pt].forEach((p) => {
+              const dot = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 10), new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }));
+              dot.position.copy(p).setY(0.05); dot.renderOrder = 997;
+              measureGroup.add(dot);
+            });
+            const mid = ms.start.clone().lerp(pt, 0.5);
+            const label = mkLabel(formatDist(dist));
+            label.position.copy(mid).setY(0.35);
+            measureGroup.add(label);
+          }
+          ms.start = pt.clone();
+          measureStartDot.position.copy(pt).setY(0.05);
+        }
+        return;
+      }
+
       if (wallToolActiveRef.current) {
         const ws = wallStateRef.current;
         const raw = groundPoint(e.clientX, e.clientY);
@@ -893,16 +1021,10 @@ export default function BoothPlannerV2() {
                 threeRef.current.setLineCountUI(groupItems.length - 1);
                 threeRef.current.setArrayHandleActive(true);
                 draggingWallHandleRef.current = { type: 'array', groupId };
-                // ocultar sprite y items reales
                 h.visible = false;
-                groupItems.forEach((it) => {
-                  const c = itemGroup.children.find((c) => c.userData.uid === it.uid);
-                  if (c) c.visible = false;
-                });
               }
             } else if (h.userData.isArrayHandle) {
               if (h.userData.sourceGroupId) {
-                // array de grupo completo
                 const groupUids = h.userData.sourceGroupUids || [];
                 const groupItems = itemsRef.current.filter((it) => groupUids.includes(it.uid));
                 if (groupItems.length) {
@@ -914,10 +1036,6 @@ export default function BoothPlannerV2() {
                   threeRef.current.setArrayHandleActive(true);
                   draggingWallHandleRef.current = { type: 'array' };
                   h.visible = false;
-                  groupItems.forEach((it) => {
-                    const c = itemGroup.children.find((c) => c.userData.uid === it.uid);
-                    if (c) c.visible = false;
-                  });
                 }
               } else {
                 const srcItem = itemsRef.current.find((it) => it.uid === h.userData.sourceUid);
@@ -929,8 +1047,6 @@ export default function BoothPlannerV2() {
                   threeRef.current.setArrayHandleActive(true);
                   draggingWallHandleRef.current = { type: 'array' };
                   h.visible = false;
-                  const c = itemGroup.children.find((c) => c.userData.uid === srcItem.uid);
-                  if (c) c.visible = false;
                 }
               }
             }
@@ -940,9 +1056,17 @@ export default function BoothPlannerV2() {
           }
         }
       }
-      // check walls first
-      const wallHits = raycaster.intersectObjects(wallGroup.children, true);
-      const hits = raycaster.intersectObjects(itemGroup.children, true);
+      // check walls first — filtrar los que están ocultos (layer visibility)
+      const wallHits = raycaster.intersectObjects(wallGroup.children, true).filter((h) => {
+        let obj = h.object;
+        while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
+        return obj.visible;
+      });
+      const hits = raycaster.intersectObjects(itemGroup.children, true).filter((h) => {
+        let obj = h.object;
+        while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
+        return obj.visible;
+      });
       // solo seleccionar pared si está más cerca que cualquier objeto
       if (wallHits.length && (!hits.length || wallHits[0].distance < hits[0].distance)) {
         let obj = wallHits[0].object;
@@ -1063,8 +1187,12 @@ export default function BoothPlannerV2() {
         pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(pointer, activeCam);
-        const hoverItemHits = raycaster.intersectObjects(itemGroup.children, true);
-        const hoverWallHits = raycaster.intersectObjects(wallGroup.children, true);
+        const hoverItemHits = raycaster.intersectObjects(itemGroup.children, true).filter((h) => {
+          let obj = h.object; while (obj.parent && obj.parent !== itemGroup) obj = obj.parent; return obj.visible;
+        });
+        const hoverWallHits = raycaster.intersectObjects(wallGroup.children, true).filter((h) => {
+          let obj = h.object; while (obj.parent && obj.parent !== wallGroup) obj = obj.parent; return obj.visible;
+        });
         const wallCloser = hoverWallHits.length && (!hoverItemHits.length || hoverWallHits[0].distance < hoverItemHits[0].distance);
 
         if (wallCloser) {
@@ -1108,6 +1236,15 @@ export default function BoothPlannerV2() {
           const dx = e.clientX - dragStartScreenX, dy = e.clientY - dragStartScreenY;
           if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
           dragArmed = true;
+          // ocultar items del array en el primer move real
+          if (draggingWallHandleRef.current.type === 'array' && arrayHandleSourceRef.current) {
+            const src = arrayHandleSourceRef.current;
+            const uidsToHide = src._isGroupArray ? (src._groupUids || []) : [src.uid];
+            uidsToHide.forEach((uid) => {
+              const c = itemGroup.children.find((c) => c.userData.uid === uid);
+              if (c) c.visible = false;
+            });
+          }
         }
         const raw = groundPoint(e.clientX, e.clientY);
         const handle = draggingWallHandleRef.current;
@@ -1147,6 +1284,41 @@ export default function BoothPlannerV2() {
         }
         return;
       }
+      if (measureToolActiveRef.current) {
+        const raw = groundPoint(e.clientX, e.clientY);
+        const pt = e.shiftKey ? raw : snapMeasurePoint(raw);
+        const ms = measureStateRef.current;
+        const { measurePreviewLine, measurePreviewLabel, measureStartDot } = threeRef.current;
+        if (ms.start) {
+          // update preview line
+          const positions = measurePreviewLine.geometry.attributes.position;
+          positions.setXYZ(0, ms.start.x, 0.05, ms.start.z);
+          positions.setXYZ(1, pt.x, 0.05, pt.z);
+          positions.needsUpdate = true;
+          measurePreviewLine.geometry.computeBoundingSphere();
+          measurePreviewLine.computeLineDistances();
+          measurePreviewLine.visible = true;
+          // update label
+          const dist = ms.start.distanceTo(pt);
+          const mid = ms.start.clone().lerp(pt, 0.5);
+          measurePreviewLabel.position.copy(mid).setY(0.35);
+          measurePreviewLabel.material.map.dispose();
+          const canvas = document.createElement('canvas');
+          canvas.width = 256; canvas.height = 64;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = 'rgba(13,15,24,0.85)';
+          ctx.roundRect(4, 4, 248, 56, 10); ctx.fill();
+          ctx.fillStyle = '#00e5ff';
+          ctx.font = 'bold 28px Inter, system-ui, sans-serif';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(formatDist(dist), 128, 32);
+          measurePreviewLabel.material.map = new THREE.CanvasTexture(canvas);
+          measurePreviewLabel.material.needsUpdate = true;
+          measurePreviewLabel.visible = true;
+        }
+        return;
+      }
+
       if (wallToolActiveRef.current) {
         const raw = groundPoint(e.clientX, e.clientY);
         const ws = wallStateRef.current;
@@ -1346,12 +1518,33 @@ export default function BoothPlannerV2() {
     window.addEventListener("resize", onResize);
 
     let raf;
-    const animate = () => { raf = requestAnimationFrame(animate); renderer.render(scene, activeCam); };
+    const spawnAnimations = []; // { container, startTime }
+    const ANIM_DURATION = 200; // ms
+    const springEase = (t) => {
+      if (t <= 0) return 1; if (t >= 1) return 1;
+      // empieza en 1, baja a 0.85, rebota a 1.08, regresa a 1
+      return 1 + Math.sin(t * Math.PI * 2) * (1 - t) * 0.12;
+    };
+    const animate = () => {
+      raf = requestAnimationFrame(animate);
+      // spring animations
+      const now = performance.now();
+      for (let i = spawnAnimations.length - 1; i >= 0; i--) {
+        const { container, startTime } = spawnAnimations[i];
+        const t = Math.min((now - startTime) / ANIM_DURATION, 1);
+        const s = springEase(t);
+        container.scale.set(s, s, s);
+        if (t >= 1) { container.scale.set(1, 1, 1); spawnAnimations.splice(i, 1); }
+      }
+      renderer.render(scene, activeCam);
+    };
     animate();
 
     threeRef.current = {
       scene, camera, renderer, itemGroup, wallGroup, handleGroup, floor, dom,
       clearGhosts,
+      addSpawnAnimation: (container) => { spawnAnimations.push({ container, startTime: performance.now() }); },
+      measureGroup, measurePreviewLine, measurePreviewLabel, measureStartDot, makeMeasureLabel,
       target, getRadiusThetaPhi: () => ({ radius, theta, phi }),
       setRadiusThetaPhi: (r, t, p) => { radius = r; theta = t; phi = p; updateCamera(); },
       getActiveCamera: () => activeCam,
@@ -1541,8 +1734,8 @@ export default function BoothPlannerV2() {
     const { floor } = threeRef.current;
     if (!floor) return;
     floor.scale.set(floorW, floorD, 1);
-    if (floor.material) floor.material.color.set(floorColor);
-  }, [floorW, floorD, floorColor]);
+    if (floor.material) floor.material.color.set(floorDark ? "#1a1a1a" : floorColor);
+  }, [floorW, floorD, floorColor, floorDark]);
 
   // ===================== Floor plan image sync =====================
   useEffect(() => {
@@ -1651,22 +1844,6 @@ export default function BoothPlannerV2() {
         cyanSprite.userData.pivotX = selItems[0].pivotX;
         cyanSprite.userData.pivotZ = selItems[0].pivotZ ?? 0;
         handleGroup.add(cyanSprite);
-
-        // green array handle — on the +X side of the whole group bounding box
-        const avgRotY = selItems[0].rotY || 0;
-        const maxOffset = Math.max(...selItems.map((it) => {
-          const def = findDef(it.kind, it.catalogId);
-          return (def?.w || 1) / 2;
-        }));
-        const rightmost = sorted[sorted.length - 1];
-        const gx = rightmost.x + Math.sin(avgRotY + Math.PI / 2) * (maxOffset + 0.4);
-        const gz = rightmost.z + Math.cos(avgRotY + Math.PI / 2) * (maxOffset + 0.4);
-        const greenSprite = makeHandleSprite(0x4ade80);
-        greenSprite.position.set(gx, 0.5, gz);
-        greenSprite.userData.isArrayHandle = true;
-        greenSprite.userData.sourceGroupId = selItems[0].groupId;
-        greenSprite.userData.sourceGroupUids = selItems.map((it) => it.uid);
-        handleGroup.add(greenSprite);
       }
     }
   }, [selectedWallUid, selectedUids, walls, items, findDef]);
@@ -1707,12 +1884,14 @@ export default function BoothPlannerV2() {
     itemGroup.children.forEach((container) => {
       const it = items.find((i) => i.uid === container.userData.uid);
       if (!it) return;
-      if (it.kind === "model") container.visible = layerVisibility.models;
-      else if (it.kind === "primitive") container.visible = layerVisibility.primitives;
-      else if (it.kind === "prop") container.visible = layerVisibility.props;
+      // categoria oculta o catalogId oculto individualmente
+      const catalogHidden = hiddenCatalogIds.has(it.catalogId);
+      if (it.kind === "model") container.visible = layerVisibility.models && !catalogHidden;
+      else if (it.kind === "primitive") container.visible = layerVisibility.primitives && !catalogHidden;
+      else if (it.kind === "prop") container.visible = layerVisibility.props && !catalogHidden;
     });
     wallGroup.children.forEach((mesh) => { mesh.visible = layerVisibility.walls; });
-  }, [layerVisibility, items]);
+  }, [layerVisibility, hiddenCatalogIds, items]);
 
   // ===================== Sync items -> meshes (GLB real con caché + placeholder mientras carga) =====================
   const loadedUidsRef = useRef(new Set()); // evita relanzar la carga si ya se está cargando ese uid
@@ -1838,6 +2017,10 @@ export default function BoothPlannerV2() {
         container.position.y = 0;
         itemGroup.add(container);
         buildContainerContents(container, it, def);
+        // spring spawn animation
+        if (appSettingsRef.current.animations) {
+          threeRef.current.addSpawnAnimation(container);
+        }
       } else if (container.userData.catalogId !== it.catalogId || container.userData.kind !== it.kind) {
         // el objeto fue reemplazado por otro modelo/primitiva: reconstruir contenido
         buildContainerContents(container, it, def);
@@ -2118,6 +2301,15 @@ export default function BoothPlannerV2() {
           threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
           setWallToolActive(false);
         }
+        if (measureToolActiveRef.current) {
+          measureStateRef.current = { active: false, start: null, measures: [] };
+          const { measurePreviewLine, measurePreviewLabel, measureStartDot, measureGroup } = threeRef.current;
+          measurePreviewLine.visible = false;
+          measurePreviewLabel.visible = false;
+          measureStartDot.visible = false;
+          while (measureGroup.children.length) measureGroup.remove(measureGroup.children[0]);
+          setMeasureToolActive(false);
+        }
         if (arrayHandleActiveRef.current) {
           arrayHandleActiveRef.current = false;
           arrayHandleSourceRef.current = null;
@@ -2249,15 +2441,16 @@ export default function BoothPlannerV2() {
 
   const updateSelected = (patch) => setItems((prev) => prev.map((it) => (it.uid === selectedUid ? { ...it, ...patch } : it)));
   const updateGroup = (patch) => setItems((prev) => prev.map((it) => (selectedUids.includes(it.uid) ? { ...it, ...patch } : it)));
+  const [groupColorMode, setGroupColorMode] = useState('varied'); // 'varied' | 'solid'
+
   const updateColor = (color) => {
     if (isWholeGroupSelected) {
-      // cada pieza del grupo mantiene su varyColor relativo al nuevo color base
       setItems((prev) => {
         const groupItems = prev.filter((it) => selectedUids.includes(it.uid));
         return prev.map((it) => {
           if (!selectedUids.includes(it.uid)) return it;
           const idx = groupItems.indexOf(it);
-          return { ...it, color: varyColor(color, idx) };
+          return { ...it, color: groupColorMode === 'varied' ? varyColor(color, idx) : color };
         });
       });
     } else {
@@ -2754,8 +2947,36 @@ export default function BoothPlannerV2() {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="8,17 12,21 16,17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>
             Export
           </button>
+
+          {/* Settings */}
+          <button onClick={() => setShowSettings((v) => !v)}
+            title="Settings"
+            style={{ width: 32, height: 32, background: showSettings ? "#1e2035" : "none", border: "1px solid #1e2035", borderRadius: 8, color: "#64748b", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
         </div>
       </header>
+
+      {/* Settings modal */}
+      {showSettings && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "flex-start", justifyContent: "flex-end", paddingTop: 56, paddingRight: 16, pointerEvents: "none" }}>
+          <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 12, padding: 20, width: 280, pointerEvents: "auto", boxShadow: "0 12px 40px rgba(0,0,0,0.5)" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#e2e8f0", marginBottom: 16 }}>Settings</div>
+
+            {/* Animations toggle */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: "#e2e8f0", fontWeight: 500 }}>Placement animations</div>
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>Spring effect when adding objects</div>
+              </div>
+              <div onClick={() => setAppSettings((s) => ({ ...s, animations: !s.animations }))}
+                style={{ width: 36, height: 20, background: appSettings.animations ? "#5b4bff" : "#1e2035", border: appSettings.animations ? "none" : "1px solid #2a2f4a", borderRadius: 10, position: "relative", cursor: "pointer", flexShrink: 0 }}>
+                <div style={{ width: 16, height: 16, background: appSettings.animations ? "#fff" : "#475569", borderRadius: "50%", position: "absolute", top: 2, left: appSettings.animations ? 18 : 2, transition: "left 0.15s" }} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===== MAIN CONTENT ===== */}
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -2860,9 +3081,18 @@ export default function BoothPlannerV2() {
                 {catItems.map((c) => {
                   const thumb = thumbnails[c.id];
                   const count = itemCounts[c.id] || 0;
+                  const isHidden = hiddenCatalogIds.has(c.id);
                   return (
-                    <div key={c.id} style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", opacity: libraryReady ? 1 : 0.5, pointerEvents: libraryReady ? "auto" : "none" }}>
-                      <div style={{ display: "flex", alignItems: "stretch", gap: 0 }}>
+                    <div key={c.id} style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", opacity: isHidden ? 0.45 : libraryReady ? 1 : 0.5, pointerEvents: libraryReady ? "auto" : "none" }}>
+                      <div style={{ display: "flex", alignItems: "stretch", gap: 0, position: "relative" }}>
+                        {/* Eye toggle — esquina superior derecha */}
+                        <button onClick={(e) => { e.stopPropagation(); toggleCatalogVisibility(c.id); }}
+                          style={{ position: "absolute", top: 4, right: 4, zIndex: 2, width: 18, height: 18, background: "rgba(13,15,24,0.7)", border: "none", borderRadius: 4, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+                          {isHidden
+                            ? <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2.5"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                            : <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                          }
+                        </button>
 
                         {/* Thumbnail — área draggable con hover "Drag" */}
                         <ModelDragArea
@@ -3028,7 +3258,15 @@ export default function BoothPlannerV2() {
         {/* Hint panel — top left */}
         {(() => {
           let title = null, color = "#94a3b8", hints = [];
-          if (arrayHandleActive) {
+          if (measureToolActive) {
+            title = "Measure tool"; color = "#f59e0b";
+            hints = [
+              { key: "Click", desc: "set start point" },
+              { key: "Click", desc: "place measurement" },
+              { key: "Shift", desc: "free snap" },
+              { key: "Esc", desc: "exit & clear" },
+            ];
+          } else if (arrayHandleActive) {
             title = "Array mode"; color = "#4ade80";
             hints = [
               { key: "Scroll", desc: "number of copies" },
@@ -3055,8 +3293,8 @@ export default function BoothPlannerV2() {
           } else if (selectedUids.length === 1 && selectedItem) {
             title = selectedItem.kind === "wall" ? "Wall selected" : "Object selected"; color = "#00e5ff";
             hints = [
-              { key: "← →", desc: "rotate 15°" },
-              { key: "Shift + ← →", desc: "rotate 1°" },
+              { key: "← → ↑ ↓", desc: "move" },
+              { key: "Shift + ← →", desc: "rotate 15°" },
               { key: "Ctrl+D", desc: "duplicate" },
               { key: "Del", desc: "delete" },
               { key: "✚", desc: "drag to create array" },
@@ -3064,10 +3302,10 @@ export default function BoothPlannerV2() {
           } else if (selectedUids.length > 1) {
             title = `Group (${selectedUids.length} objects)`; color = "#00e5ff";
             hints = [
-              { key: "← →", desc: "rotate around pivot" },
-              { key: "Shift + ← →", desc: "rotate each in place" },
+              { key: "← → ↑ ↓", desc: "move group" },
+              { key: "Shift + ← →", desc: "rotate around pivot" },
+              { key: "Shift + Alt + ← →", desc: "rotate each in place" },
               { key: "Del", desc: "delete all" },
-              { key: "✚", desc: "drag to re-edit array" },
             ];
           }
           if (!title) return null;
@@ -3107,7 +3345,35 @@ export default function BoothPlannerV2() {
         </div>
 
         {/* Camera panel button — below gizmo */}
-        <div style={{ position: "absolute", top: 70, right: 12 }}>
+        <div style={{ position: "absolute", top: 70, right: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+          {/* Floor dark mode */}
+          <button onClick={() => {
+            const next = !floorDark;
+            setFloorDark(next);
+            const { floor } = threeRef.current;
+            if (floor?.material) floor.material.color.set(next ? "#1a1a1a" : floorColorRef.current);
+          }}
+            title="Dark floor"
+            style={{ width: 36, height: 36, background: floorDark ? "#1a1a1a" : "rgba(13,17,23,0.85)", border: `1px solid ${floorDark ? "#4a4a4a" : "#1e2035"}`, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={floorDark ? "#e2e8f0" : "#64748b"} strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+          </button>
+          <button onClick={() => {
+            const next = !measureToolActive;
+            setMeasureToolActive(next);
+            measureToolActiveRef.current = next;
+            if (!next) {
+              measureStateRef.current = { active: false, start: null, measures: [] };
+              const { measurePreviewLine, measurePreviewLabel, measureStartDot, measureGroup } = threeRef.current;
+              measurePreviewLine.visible = false;
+              measurePreviewLabel.visible = false;
+              measureStartDot.visible = false;
+              while (measureGroup.children.length) measureGroup.remove(measureGroup.children[0]);
+            }
+          }}
+            title="Measure"
+            style={{ width: 36, height: 36, background: measureToolActive ? "#5b4bff" : "rgba(13,17,23,0.85)", border: `1px solid ${measureToolActive ? "#5b4bff" : "#1e2035"}`, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={measureToolActive ? "#fff" : "#64748b"} strokeWidth="2"><path d="M2 12h20M2 12l4-4M2 12l4 4M22 12l-4-4M22 12l-4 4"/></svg>
+          </button>
           <button onClick={() => setShowCameraPanel((v) => !v)}
             title="Cameras"
             style={{ width: 36, height: 36, background: showCameraPanel ? "#5b4bff" : "rgba(13,17,23,0.85)", border: "1px solid #1e2035", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
@@ -3368,13 +3634,38 @@ export default function BoothPlannerV2() {
                 <button onClick={rotateSelected} style={{ background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "6px 10px", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}>+90°</button>
               </div>
             ) : (
-              <div style={{ fontSize: 10, color: "#475569" }}>← → pivot · Shift+← → each in place</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ fontSize: 10, color: "#475569" }}>Shift + ← → · rotate group around pivot</div>
+                <div style={{ fontSize: 10, color: "#475569" }}>Shift + Alt + ← → · rotate each in place</div>
+              </div>
             )}
           </div>
 
           {/* Color */}
           <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Color</div>
+            {isWholeGroupSelected && (
+              <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+                {[["varied", "Varied"], ["solid", "Solid"]].map(([mode, label]) => (
+                  <button key={mode} onClick={() => {
+                    setGroupColorMode(mode);
+                    // aplicar inmediatamente al grupo con el color actual
+                    const baseColor = selectedItem.color;
+                    setItems((prev) => {
+                      const groupItems = prev.filter((it) => selectedUids.includes(it.uid));
+                      return prev.map((it) => {
+                        if (!selectedUids.includes(it.uid)) return it;
+                        const idx = groupItems.indexOf(it);
+                        return { ...it, color: mode === 'varied' ? varyColor(baseColor, idx) : baseColor };
+                      });
+                    });
+                  }}
+                    style={{ flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: "pointer", border: `1px solid ${groupColorMode === mode ? "#5b4bff" : "#1e2035"}`, background: groupColorMode === mode ? "#5b4bff" : "#0d0f18", color: groupColorMode === mode ? "#fff" : "#64748b" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={selectedItem.color} onChange={(e) => updateColor(e.target.value)}
                 style={{ width: 40, height: 40, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
@@ -3517,7 +3808,7 @@ export default function BoothPlannerV2() {
           const it = items.find((it) => it.catalogId === catalogId);
           const kind = it?.kind || "model";
           // hide chip if layer is hidden
-          if (kind === "model" && !layerVisibility.models) return null;
+          if (kind === "model" && (!layerVisibility.models || hiddenCatalogIds.has(catalogId))) return null;
           if (kind === "primitive" && !layerVisibility.primitives) return null;
           if (kind === "prop" && !layerVisibility.props) return null;
           const def = findDef(kind, catalogId);
