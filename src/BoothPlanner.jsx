@@ -666,8 +666,9 @@ export default function BoothPlannerV2() {
     const onDown = (e) => {
       if (e.button === 2) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; }
       else if (e.button === 1) { isPanning = true; panLastX = e.clientX; panLastY = e.clientY; e.preventDefault(); }
-      // Alt + left drag = orbit (Magic Mouse / trackpad)
       else if (e.button === 0 && e.altKey) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
+      // Ctrl + left drag = pan (Magic Mouse friendly)
+      else if (e.button === 0 && e.ctrlKey) { isPanning = true; panLastX = e.clientX; panLastY = e.clientY; e.preventDefault(); }
     };
     const onMoveOrbit = (e) => {
       if (isPanning) {
@@ -2325,6 +2326,20 @@ export default function BoothPlannerV2() {
 
       if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
         if (inInput) return;
+
+        // array mode — ↑↓ cambian cantidad de copias, ←→ bloqueados
+        if (arrayHandleActiveRef.current) {
+          e.preventDefault();
+          if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+            const delta = e.key === "ArrowUp" ? 1 : -1;
+            const next = Math.max(1, lineCountRef.current + delta);
+            lineCountRef.current = next;
+            threeRef.current.setLineCountUI(next);
+            const state = threeRef.current._arrayDragState;
+            if (state) threeRef.current.buildArrayGhosts(state.origin, state.endPt, next, state.src, 0);
+          }
+          return;
+        }
         const handledByLine = threeRef.current.adjustLineAngle && threeRef.current.adjustLineAngle(
           (e.key === "ArrowLeft" ? -1 : 1) * (15 * Math.PI / 180)
         );
@@ -3269,7 +3284,7 @@ export default function BoothPlannerV2() {
           } else if (arrayHandleActive) {
             title = "Array mode"; color = "#4ade80";
             hints = [
-              { key: "Scroll", desc: "number of copies" },
+              { key: "Scroll / ↑ ↓", desc: "number of copies" },
               { key: "Shift", desc: "free angle" },
               { key: "Alt", desc: "snap to width" },
               { key: "Esc", desc: "cancel" },
