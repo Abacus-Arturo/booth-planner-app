@@ -31,12 +31,7 @@ const PRIMITIVES = [
 ];
 
 // Props: objetos pequeños con posición/altura libres, que se pueden "pegar" (attach) a otro objeto arrastrándolos encima.
-const PROPS = [
-  { id: "prop_plant", name: "Plant", kind: "cylinder", w: 0.4, d: 0.4, h: 0.7, color: "#3f7d44" },
-  { id: "prop_screen", name: "Screen", kind: "box", w: 0.9, d: 0.06, h: 0.55, color: "#1a1a1a" },
-  { id: "prop_sign", name: "Sign", kind: "box", w: 0.5, d: 0.05, h: 0.3, color: "#d9c46a" },
-  { id: "prop_chair", name: "Chair", kind: "box", w: 0.45, d: 0.45, h: 0.45, color: "#8a5a3b" },
-];
+const PROPS = [];
 
 function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
@@ -471,6 +466,7 @@ export default function BoothPlannerV2() {
   const [pendingLineDef, setPendingLineDef] = useState(null); // {def, kind}
   const [wallToolActive, setWallToolActive] = useState(false);
   const [wallConfig, setWallConfig] = useState({ height: 2.4, glassRatio: 0, thickness: 0.1, color: "#cccccc" });
+  const [layerVisibility, setLayerVisibility] = useState({ models: true, primitives: true, props: true, walls: true });
   const wallStateRef = useRef({ active: false, start: null, end: null });
   const wallConfigRef = useRef(wallConfig);
   useEffect(() => { wallConfigRef.current = wallConfig; }, [wallConfig]);
@@ -651,6 +647,8 @@ export default function BoothPlannerV2() {
     const onDown = (e) => {
       if (e.button === 2) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; }
       else if (e.button === 1) { isPanning = true; panLastX = e.clientX; panLastY = e.clientY; e.preventDefault(); }
+      // Alt + left drag = orbit (Magic Mouse / trackpad)
+      else if (e.button === 0 && e.altKey) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
     };
     const onMoveOrbit = (e) => {
       if (isPanning) {
@@ -673,9 +671,26 @@ export default function BoothPlannerV2() {
     };
     const onUp = () => { isOrbiting = false; isPanning = false; };
     const onWheel = (e) => {
+      e.preventDefault();
+      // Normalizar deltaY según deltaMode (pixel vs line vs page)
+      const normY = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+      const normX = e.deltaMode === 1 ? e.deltaX * 20 : e.deltaMode === 2 ? e.deltaX * 400 : e.deltaX;
+
+      // Dos dedos con componente horizontal = pan (trackpad/Magic Mouse)
+      if (Math.abs(normX) > Math.abs(normY) * 0.3 && !e.ctrlKey) {
+        const forward = new THREE.Vector3().subVectors(target, activeCam.position).normalize();
+        const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+        const upV = new THREE.Vector3().crossVectors(right, forward).normalize();
+        const panSpeed = radius * 0.003;
+        target.addScaledVector(right, normX * panSpeed * 0.01);
+        target.addScaledVector(upV, -normY * panSpeed * 0.01);
+        updateCamera();
+        return;
+      }
+
+      // Array mode: scroll = cantidad de copias
       if (lineStateRef.current.active) {
-        e.preventDefault();
-        const delta = e.deltaY > 0 ? -1 : 1;
+        const delta = normY > 0 ? -1 : 1;
         const next = Math.max(1, lineCountRef.current + delta);
         lineCountRef.current = next;
         threeRef.current.setLineCountUI(next);
@@ -683,8 +698,7 @@ export default function BoothPlannerV2() {
         return;
       }
       if (arrayHandleActiveRef.current) {
-        e.preventDefault();
-        const delta = e.deltaY > 0 ? -1 : 1;
+        const delta = normY > 0 ? -1 : 1;
         const next = Math.max(1, lineCountRef.current + delta);
         lineCountRef.current = next;
         threeRef.current.setLineCountUI(next);
@@ -692,14 +706,20 @@ export default function BoothPlannerV2() {
         if (state) threeRef.current.buildArrayGhosts(state.origin, state.endPt, next, state.src, 0);
         return;
       }
-      radius = Math.min(Math.max(radius + e.deltaY * 0.01, 3), 40); updateCamera();
+
+      // Zoom — normalizado y menos sensible
+      const zoomDelta = normY * 0.003;
+      radius = Math.min(Math.max(radius + zoomDelta * radius * 0.1, 3), 40);
+      updateCamera();
     };
     const onCtx = (e) => e.preventDefault();
+    const onMouseLeave = () => { hoverSphere.visible = false; hoveredUid = null; };
     dom.addEventListener("pointerdown", onDown);
     window.addEventListener("pointermove", onMoveOrbit);
     window.addEventListener("pointerup", onUp);
     dom.addEventListener("wheel", onWheel, { passive: false });
     dom.addEventListener("contextmenu", onCtx);
+    dom.addEventListener("pointerleave", onMouseLeave);
 
     // ---- Item group + drag/select ----
     const itemGroup = new THREE.Group();
@@ -710,6 +730,15 @@ export default function BoothPlannerV2() {
     scene.add(handleGroup);
     const ghostGroup = new THREE.Group();
     scene.add(ghostGroup);
+
+    // Hover indicator — esferita que aparece arriba del objeto bajo el cursor
+    const hoverSphereMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false, transparent: true, opacity: 0.9 });
+    const hoverSphere = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), hoverSphereMat);
+    hoverSphere.visible = false;
+    hoverSphere.renderOrder = 998;
+    hoverSphere.raycast = () => {};
+    scene.add(hoverSphere);
+    let hoveredUid = null;
 
     const clearGhosts = () => {
       while (ghostGroup.children.length) {
@@ -872,18 +901,37 @@ export default function BoothPlannerV2() {
                 });
               }
             } else if (h.userData.isArrayHandle) {
-              const srcItem = itemsRef.current.find((it) => it.uid === h.userData.sourceUid);
-              if (srcItem) {
-                arrayHandleActiveRef.current = true;
-                arrayHandleSourceRef.current = { ...srcItem };
-                lineCountRef.current = 2;
-                threeRef.current.setLineCountUI(2);
-                threeRef.current.setArrayHandleActive(true);
-                draggingWallHandleRef.current = { type: 'array' };
-                // ocultar sprite y item original
-                h.visible = false;
-                const c = itemGroup.children.find((c) => c.userData.uid === srcItem.uid);
-                if (c) c.visible = false;
+              if (h.userData.sourceGroupId) {
+                // array de grupo completo
+                const groupUids = h.userData.sourceGroupUids || [];
+                const groupItems = itemsRef.current.filter((it) => groupUids.includes(it.uid));
+                if (groupItems.length) {
+                  const pivotItem = groupItems.find((it) => it.pivotX != null) || groupItems[0];
+                  arrayHandleActiveRef.current = true;
+                  arrayHandleSourceRef.current = { ...pivotItem, _isGroupArray: true, _groupUids: groupUids };
+                  lineCountRef.current = 2;
+                  threeRef.current.setLineCountUI(2);
+                  threeRef.current.setArrayHandleActive(true);
+                  draggingWallHandleRef.current = { type: 'array' };
+                  h.visible = false;
+                  groupItems.forEach((it) => {
+                    const c = itemGroup.children.find((c) => c.userData.uid === it.uid);
+                    if (c) c.visible = false;
+                  });
+                }
+              } else {
+                const srcItem = itemsRef.current.find((it) => it.uid === h.userData.sourceUid);
+                if (srcItem) {
+                  arrayHandleActiveRef.current = true;
+                  arrayHandleSourceRef.current = { ...srcItem };
+                  lineCountRef.current = 2;
+                  threeRef.current.setLineCountUI(2);
+                  threeRef.current.setArrayHandleActive(true);
+                  draggingWallHandleRef.current = { type: 'array' };
+                  h.visible = false;
+                  const c = itemGroup.children.find((c) => c.userData.uid === srcItem.uid);
+                  if (c) c.visible = false;
+                }
               }
             }
             dragArmed = false;
@@ -894,7 +942,9 @@ export default function BoothPlannerV2() {
       }
       // check walls first
       const wallHits = raycaster.intersectObjects(wallGroup.children, true);
-      if (wallHits.length) {
+      const hits = raycaster.intersectObjects(itemGroup.children, true);
+      // solo seleccionar pared si está más cerca que cualquier objeto
+      if (wallHits.length && (!hits.length || wallHits[0].distance < hits[0].distance)) {
         let obj = wallHits[0].object;
         while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
         const wuid = obj.userData.wallUid;
@@ -912,7 +962,6 @@ export default function BoothPlannerV2() {
         }
         return;
       }
-      const hits = raycaster.intersectObjects(itemGroup.children, true);
       if (hits.length) {
         let obj = hits[0].object;
         while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
@@ -1008,6 +1057,51 @@ export default function BoothPlannerV2() {
       return new THREE.Vector3(start.x + Math.sin(snapped) * len, 0, start.z + Math.cos(snapped) * len);
     };
     const onMoveDrag = (e) => {
+      // ---- Hover highlight ----
+      if (!draggingUid && !draggingWallUid && !draggingWallHandleRef.current) {
+        const rect = dom.getBoundingClientRect();
+        pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(pointer, activeCam);
+        const hoverItemHits = raycaster.intersectObjects(itemGroup.children, true);
+        const hoverWallHits = raycaster.intersectObjects(wallGroup.children, true);
+        const wallCloser = hoverWallHits.length && (!hoverItemHits.length || hoverWallHits[0].distance < hoverItemHits[0].distance);
+
+        if (wallCloser) {
+          // hover sobre pared
+          let obj = hoverWallHits[0].object;
+          while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
+          const uid = obj.userData.wallUid;
+          if (uid !== hoveredUid) {
+            hoveredUid = uid;
+            const box = new THREE.Box3().setFromObject(obj);
+            const top = box.max.y + 0.2;
+            const center = box.getCenter(new THREE.Vector3());
+            hoverSphere.position.set(center.x, top, center.z);
+            hoverSphere.visible = true;
+          }
+        } else if (hoverItemHits.length) {
+          // hover sobre objeto
+          let obj = hoverItemHits[0].object;
+          while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
+          const uid = obj.userData.uid;
+          if (uid !== hoveredUid) {
+            hoveredUid = uid;
+            const box = new THREE.Box3().setFromObject(obj);
+            const top = box.max.y + 0.2;
+            const center = box.getCenter(new THREE.Vector3());
+            hoverSphere.position.set(center.x, top, center.z);
+            hoverSphere.visible = true;
+          }
+        } else {
+          hoveredUid = null;
+          hoverSphere.visible = false;
+        }
+      } else {
+        hoveredUid = null;
+        hoverSphere.visible = false;
+      }
+
       // ---- Wall/Line handle drag ----
       if (draggingWallHandleRef.current) {
         if (!dragArmed) {
@@ -1157,8 +1251,37 @@ export default function BoothPlannerV2() {
                     pivotX: origin.x, pivotZ: origin.z,
                   });
               }
+              // seleccionar el grupo completo
+              setTimeout(() => threeRef.current.setSelectedGroup(newGroup.map((it) => it.uid)), 0);
               return [...nonGroup, ...newGroup];
             });
+          } else if (src._isGroupArray) {
+            // duplicar el grupo completo n veces a lo largo de la línea
+            const groupUids = src._groupUids;
+            const groupItems = itemsRef.current.filter((it) => groupUids.includes(it.uid));
+            const allNewUids = [];
+            const newItems = [];
+            for (let i = 1; i <= n; i++) {
+              const t = i / n;
+              const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+              const offset = new THREE.Vector3(pos.x - src.x, 0, pos.z - src.z);
+              const newGroupId = `group_${Date.now()}_${i}`;
+              const groupNewUids = [];
+              groupItems.forEach((it) => {
+                const uid = `${it.catalogId}_${Date.now()}_g${i}_${Math.random().toString(36).slice(2,6)}`;
+                groupNewUids.push(uid);
+                newItems.push({
+                  ...it, uid,
+                  x: it.x + offset.x, z: it.z + offset.z,
+                  groupId: newGroupId,
+                  pivotX: (it.pivotX ?? it.x) + offset.x,
+                  pivotZ: (it.pivotZ ?? it.z) + offset.z,
+                });
+              });
+              allNewUids.push(...groupNewUids);
+            }
+            threeRef.current.commitLineItems(newItems);
+            setTimeout(() => threeRef.current.setSelectedGroup(allNewUids), 0);
           } else {
             const groupId = `line_${Date.now()}`;
             const newItems = [];
@@ -1175,6 +1298,9 @@ export default function BoothPlannerV2() {
             }
             threeRef.current.addToGroup(src.uid, groupId, origin.x, origin.z, angle);
             threeRef.current.commitLineItems(newItems);
+            // seleccionar el grupo completo (original + nuevas copias)
+            const allGroupUids = [src.uid, ...newItems.map((it) => it.uid)];
+            setTimeout(() => threeRef.current.setSelectedGroup(allGroupUids), 0);
           }
           threeRef.current._arrayDragState = null;
           clearGhosts();
@@ -1322,6 +1448,31 @@ export default function BoothPlannerV2() {
       },
       buildArrayGhosts: (origin, endPt, n, src, angleOffset = 0) => {
         clearGhosts();
+        if (src._isGroupArray) {
+          // group array — mostrar ghost del bounding box del grupo completo
+          const groupUids = src._groupUids;
+          const groupItems = itemsRef.current.filter((it) => groupUids.includes(it.uid));
+          // calcular bounding box del grupo
+          const xs = groupItems.map((it) => it.x), zs = groupItems.map((it) => it.z);
+          const minX = Math.min(...xs), maxX = Math.max(...xs);
+          const minZ = Math.min(...zs), maxZ = Math.max(...zs);
+          const gw = (maxX - minX) + 2, gh = 2, gd = (maxZ - minZ) + 2;
+          const makeGroupGhost = (offset) => {
+            const geo = new THREE.BoxGeometry(gw, gh, gd);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.45, metalness: 0.15, transparent: true, opacity: 0.25 });
+            const ghost = new THREE.Mesh(geo, mat);
+            ghost.position.set(src.x + offset.x, gh / 2, src.z + offset.z);
+            ghostGroup.add(ghost);
+          };
+          makeGroupGhost(new THREE.Vector3(0, 0, 0)); // original
+          for (let i = 1; i <= n; i++) {
+            const t = i / n;
+            const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+            makeGroupGhost(new THREE.Vector3(pos.x - origin.x, 0, pos.z - origin.z));
+          }
+          threeRef.current._arrayDragState = { origin, endPt, n, src, angleOffset: 0 };
+          return;
+        }
         const def = findDefRef.current(src.kind, src.catalogId);
         if (!def) return;
         const dir = new THREE.Vector3().subVectors(endPt, origin);
@@ -1377,6 +1528,7 @@ export default function BoothPlannerV2() {
       window.removeEventListener("pointerup", onUpDrag);
       dom.removeEventListener("wheel", onWheel, { passive: false });
       dom.removeEventListener("contextmenu", onCtx);
+      dom.removeEventListener("pointerleave", onMouseLeave);
       window.removeEventListener("resize", onResize);
       mount.removeChild(dom);
       renderer.dispose();
@@ -1479,7 +1631,7 @@ export default function BoothPlannerV2() {
       }
     }
 
-    // Group handles — solo sprite del extremo final (el del inicio no existe)
+    // Group handles
     if (selectedUids.length > 1) {
       const selItems = items.filter((it) => selectedUids.includes(it.uid));
       const allSameGroup = selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
@@ -1490,14 +1642,31 @@ export default function BoothPlannerV2() {
           return da - db;
         });
         const last = sorted[sorted.length - 1];
-        const sprite = makeHandleSprite(0x00e5ff);
-        sprite.position.set(last.x, 0.5, last.z);
-        sprite.userData.isLineHandle = true;
-        sprite.userData.groupId = selItems[0].groupId;
-        sprite.userData.role = 'end';
-        sprite.userData.pivotX = selItems[0].pivotX;
-        sprite.userData.pivotZ = selItems[0].pivotZ ?? 0;
-        handleGroup.add(sprite);
+        // cyan re-edit handle
+        const cyanSprite = makeHandleSprite(0x00e5ff);
+        cyanSprite.position.set(last.x, 0.5, last.z);
+        cyanSprite.userData.isLineHandle = true;
+        cyanSprite.userData.groupId = selItems[0].groupId;
+        cyanSprite.userData.role = 'end';
+        cyanSprite.userData.pivotX = selItems[0].pivotX;
+        cyanSprite.userData.pivotZ = selItems[0].pivotZ ?? 0;
+        handleGroup.add(cyanSprite);
+
+        // green array handle — on the +X side of the whole group bounding box
+        const avgRotY = selItems[0].rotY || 0;
+        const maxOffset = Math.max(...selItems.map((it) => {
+          const def = findDef(it.kind, it.catalogId);
+          return (def?.w || 1) / 2;
+        }));
+        const rightmost = sorted[sorted.length - 1];
+        const gx = rightmost.x + Math.sin(avgRotY + Math.PI / 2) * (maxOffset + 0.4);
+        const gz = rightmost.z + Math.cos(avgRotY + Math.PI / 2) * (maxOffset + 0.4);
+        const greenSprite = makeHandleSprite(0x4ade80);
+        greenSprite.position.set(gx, 0.5, gz);
+        greenSprite.userData.isArrayHandle = true;
+        greenSprite.userData.sourceGroupId = selItems[0].groupId;
+        greenSprite.userData.sourceGroupUids = selItems.map((it) => it.uid);
+        handleGroup.add(greenSprite);
       }
     }
   }, [selectedWallUid, selectedUids, walls, items, findDef]);
@@ -1530,6 +1699,20 @@ export default function BoothPlannerV2() {
       wallGroup.add(mesh);
     });
   }, [walls, selectedWallUid]);
+
+  // ===================== Layer visibility =====================
+  useEffect(() => {
+    const { itemGroup, wallGroup } = threeRef.current;
+    if (!itemGroup || !wallGroup) return;
+    itemGroup.children.forEach((container) => {
+      const it = items.find((i) => i.uid === container.userData.uid);
+      if (!it) return;
+      if (it.kind === "model") container.visible = layerVisibility.models;
+      else if (it.kind === "primitive") container.visible = layerVisibility.primitives;
+      else if (it.kind === "prop") container.visible = layerVisibility.props;
+    });
+    wallGroup.children.forEach((mesh) => { mesh.visible = layerVisibility.walls; });
+  }, [layerVisibility, items]);
 
   // ===================== Sync items -> meshes (GLB real con caché + placeholder mientras carga) =====================
   const loadedUidsRef = useRef(new Set()); // evita relanzar la carga si ya se está cargando ese uid
@@ -1584,25 +1767,26 @@ export default function BoothPlannerV2() {
       loadedUidsRef.current.delete(it.uid); // permite recargar si el nuevo modelo trae GLB
 
       const pw = it.w ?? def.w, pdz = it.d ?? def.d, ph = it.h ?? def.h;
-      const placeholderGeo = it.kind !== "model" ? buildPlaceholderGeometry(def.kind, pw, pdz, ph) : new THREE.BoxGeometry(def.w, def.h, def.d);
+      const hasFile = !!(def.file);
+      const placeholderGeo = (it.kind !== "model" && !hasFile) ? buildPlaceholderGeometry(def.kind, pw, pdz, ph) : new THREE.BoxGeometry(def.w, def.h, def.d);
       const placeholderMat = new THREE.MeshStandardMaterial({ color: it.color || def.color || "#888888", roughness: 0.45, metalness: 0.15 });
       const placeholder = new THREE.Mesh(placeholderGeo, placeholderMat);
       placeholder.castShadow = true;
       placeholder.receiveShadow = true;
-      placeholder.position.y = (it.kind !== "model" ? ph : def.h) / 2;
+      placeholder.position.y = ((it.kind !== "model" && !hasFile) ? ph : def.h) / 2;
       placeholder.userData.isPlaceholder = true;
       placeholder.userData.curW = pw; placeholder.userData.curD = pdz; placeholder.userData.curH = ph;
       container.add(placeholder);
 
       if (container.userData.outline) { container.remove(container.userData.outline); container.userData.outline.geometry.dispose(); container.userData.outline.material.dispose(); }
-      const phForOutline = it.kind !== "model" ? ph : def.h;
+      const phForOutline = (it.kind !== "model" && !hasFile) ? ph : def.h;
       const outline = buildOutlineBox(pw, phForOutline, pdz);
       outline.position.y = phForOutline / 2;
       outline.visible = false;
       container.userData.outline = outline;
       container.add(outline);
 
-      if (it.kind === "model" && def.file && !loadedUidsRef.current.has(it.uid)) {
+      if ((it.kind === "model" || (it.kind === "prop" && def.file)) && def.file && !loadedUidsRef.current.has(it.uid)) {
         loadedUidsRef.current.add(it.uid);
         getModelClone(def.file)
           .then((root) => {
@@ -1947,36 +2131,80 @@ export default function BoothPlannerV2() {
         return;
       }
 
-      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
         if (inInput) return;
-        const deg = e.shiftKey ? 1 : 15;
-        const delta = (e.key === "ArrowLeft" ? -1 : 1) * (deg * Math.PI / 180);
-        const handledByLine = threeRef.current.adjustLineAngle && threeRef.current.adjustLineAngle(delta);
+        const handledByLine = threeRef.current.adjustLineAngle && threeRef.current.adjustLineAngle(
+          (e.key === "ArrowLeft" ? -1 : 1) * (15 * Math.PI / 180)
+        );
         if (handledByLine) { e.preventDefault(); return; }
         if (!selectedUids.length) return;
         e.preventDefault();
-        setItems((prev) => {
-          const selItems = prev.filter((it) => selectedUids.includes(it.uid));
-          const allSameGroup = selItems.length > 1 && selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
-          if (allSameGroup) {
-            if (e.shiftKey) {
-              // Shift = cada objeto rota en su propio origen
-              return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
-            } else {
-              // Normal = todo el grupo rota alrededor del primer objeto (pivote guardado)
-              const pivotItem = selItems.find((it) => it.pivotX != null) || selItems[0];
-              const pivotX = pivotItem.pivotX ?? pivotItem.x;
-              const pivotZ = pivotItem.pivotZ ?? pivotItem.z;
-              const axis = new THREE.Vector3(0, 1, 0);
-              return prev.map((it) => {
-                if (!selectedUids.includes(it.uid)) return it;
-                const rel = new THREE.Vector3(it.x - pivotX, 0, it.z - pivotZ).applyAxisAngle(axis, delta);
-                return { ...it, x: pivotX + rel.x, z: pivotZ + rel.z, rotY: it.rotY + delta };
-              });
+
+        if (e.shiftKey) {
+          // Shift = rotar
+          const deg = 15;
+          const delta = (e.key === "ArrowLeft" ? -1 : 1) * (deg * Math.PI / 180);
+          setItems((prev) => {
+            const selItems = prev.filter((it) => selectedUids.includes(it.uid));
+            const allSameGroup = selItems.length > 1 && selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
+            if (allSameGroup) {
+              if (e.altKey) {
+                // Shift+Alt = cada objeto rota en su propio origen
+                return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
+              } else {
+                // Shift = todo el grupo rota alrededor del pivote
+                const pivotItem = selItems.find((it) => it.pivotX != null) || selItems[0];
+                const pivotX = pivotItem.pivotX ?? pivotItem.x;
+                const pivotZ = pivotItem.pivotZ ?? pivotItem.z;
+                const axis = new THREE.Vector3(0, 1, 0);
+                return prev.map((it) => {
+                  if (!selectedUids.includes(it.uid)) return it;
+                  const rel = new THREE.Vector3(it.x - pivotX, 0, it.z - pivotZ).applyAxisAngle(axis, delta);
+                  return { ...it, x: pivotX + rel.x, z: pivotZ + rel.z, rotY: it.rotY + delta };
+                });
+              }
             }
-          }
-          return prev.map((it) => (selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it));
-        });
+            // objeto individual: Shift rota
+            return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
+          });
+        } else {
+          // Sin Shift = mover en el eje local del objeto más alineado con la cámara
+          const STEP = 0.1;
+          const cam = threeRef.current.getActiveCamera();
+          const target = threeRef.current.target || new THREE.Vector3(0, 0, 0);
+          // eje derecho y forward de la cámara proyectados al piso
+          const camForward = new THREE.Vector3().subVectors(target, cam.position).setY(0).normalize();
+          const camRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), camForward).normalize();
+
+          // para cada objeto seleccionado, encontrar cuál eje local (+X o +Z) está más alineado con camRight/camForward
+          const isHorizontal = e.key === "ArrowLeft" || e.key === "ArrowRight";
+          const sign = (e.key === "ArrowLeft" || e.key === "ArrowUp") ? 1 : -1;
+          const camAxis = isHorizontal ? camRight : camForward;
+
+          setItems((prev) => prev.map((it) => {
+            if (!selectedUids.includes(it.uid)) return it;
+            const rotY = it.rotY || 0;
+            // ejes locales del objeto en el plano XZ
+            const localX = new THREE.Vector3(Math.cos(rotY), 0, -Math.sin(rotY));
+            const localZ = new THREE.Vector3(Math.sin(rotY), 0,  Math.cos(rotY));
+            // cuál eje local está más alineado con la dirección de la cámara
+            const dotX = Math.abs(localX.dot(camAxis));
+            const dotZ = Math.abs(localZ.dot(camAxis));
+            let moveAxis, axisSign;
+            if (dotX >= dotZ) {
+              moveAxis = localX;
+              axisSign = localX.dot(camAxis) >= 0 ? sign : -sign;
+            } else {
+              moveAxis = localZ;
+              axisSign = localZ.dot(camAxis) >= 0 ? sign : -sign;
+            }
+            const dx = moveAxis.x * axisSign * STEP;
+            const dz = moveAxis.z * axisSign * STEP;
+            return { ...it, x: it.x + dx, z: it.z + dz,
+              pivotX: it.pivotX != null ? it.pivotX + dx : it.pivotX,
+              pivotZ: it.pivotZ != null ? it.pivotZ + dz : it.pivotZ };
+          }));
+        }
         return;
       }
 
@@ -1987,15 +2215,19 @@ export default function BoothPlannerV2() {
         return;
       }
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (inInput) return; // no borrar mientras escribe en un campo de texto
-        e.preventDefault();
+        // Si hay pared o objetos seleccionados, borrar siempre (ignora input)
         if (selectedWallUid) {
+          e.preventDefault();
           setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid));
           setSelectedWallUid(null);
           return;
         }
-        setItems((prev) => prev.filter((it) => !selectedUids.includes(it.uid)));
-        setSelectedUids([]);
+        if (selectedUids.length > 0) {
+          if (inInput) return; // solo bloquear si escribe en input y no hay selección
+          e.preventDefault();
+          setItems((prev) => prev.filter((it) => !selectedUids.includes(it.uid)));
+          setSelectedUids([]);
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -2197,7 +2429,6 @@ export default function BoothPlannerV2() {
     const scale = m.scale;
 
     if (outlinePoints && outlinePoints.length >= 3) {
-      // convertir puntos a metros (relativos al centro de la imagen)
       const pts = outlinePoints.map((p) => ({
         x: (p.x - m.imgW / 2) * scale,
         z: (p.y - m.imgH / 2) * scale,
@@ -2207,17 +2438,23 @@ export default function BoothPlannerV2() {
       const minZ = Math.min(...zs), maxZ = Math.max(...zs);
       const w = maxX - minX;
       const d = maxZ - minZ;
-      // centroide del contorno = offset del piso respecto al centro de la imagen
       const cx = (minX + maxX) / 2;
       const cz = (minZ + maxZ) / 2;
-      setFloorW(w); setFloorD(d);
-      // el plano de la imagen se centra en (0,0,0) pero el piso (floor mesh) se posiciona en el centroide
-      // Para alinearlos: movemos el plano de imagen al negativo del centroide,
-      // así el área del contorno queda centrada en (0,0,0) donde está el piso
-      setFloorPlan({ dataUrl: m.dataUrl, realW, realH, opacity: 0.5, x: -cx, z: -cz, visible: true });
+      // go to confirm step with calculated dims
+      setFloorPlanModal((prev) => ({ ...prev, step: "confirm", calcW: w, calcD: d, cx, cz, outlinePoints }));
     } else {
-      setFloorW(realW); setFloorD(realH);
-      setFloorPlan({ dataUrl: m.dataUrl, realW, realH, opacity: 0.5, x: 0, z: 0, visible: true });
+      // no outline — go to confirm with full image dims
+      setFloorPlanModal((prev) => ({ ...prev, step: "confirm", calcW: realW, calcD: realH, cx: 0, cz: 0, outlinePoints: null }));
+    }
+  };
+
+  const handleConfirmDimensions = (w, d) => {
+    const m = floorPlanModal;
+    setFloorW(w); setFloorD(d);
+    if (m.outlinePoints) {
+      setFloorPlan({ dataUrl: m.dataUrl, realW: m.realW, realH: m.realH, opacity: 0.5, x: -m.cx, z: -m.cz, visible: true });
+    } else {
+      setFloorPlan({ dataUrl: m.dataUrl, realW: m.realW, realH: m.realH, opacity: 0.5, x: 0, z: 0, visible: true });
     }
     setFloorPlanModal(null);
   };
@@ -2233,6 +2470,7 @@ export default function BoothPlannerV2() {
     floorPlan: floorPlan || null,
     items, walls, cameras,
     catalogColors,
+    wallConfig,
   });
 
   const restoreProjectData = (data) => {
@@ -2247,6 +2485,7 @@ export default function BoothPlannerV2() {
     setWalls(data.walls || []);
     setCameras(data.cameras || []);
     if (data.catalogColors) setCatalogColors(data.catalogColors);
+    if (data.wallConfig) setWallConfig(data.wallConfig);
     setSelectedUids([]);
     setSelectedWallUid(null);
   };
@@ -2308,6 +2547,8 @@ export default function BoothPlannerV2() {
     setItems([]); setWalls([]); setCameras([]);
     setFloorW(10); setFloorD(8); setFloorColor("#e9e9e9");
     setFloorPlan(null);
+    setWallConfig({ height: 2.4, glassRatio: 0, thickness: 0.1, color: "#cccccc" });
+    setProjectName("Untitled Project");
     setSelectedUids([]); setSelectedWallUid(null);
     setShowFileMenu(false);
   };
@@ -2385,6 +2626,7 @@ export default function BoothPlannerV2() {
         modal={floorPlanModal}
         onConfirmCalibrate={handleCalibrateConfirm}
         onConfirmOutline={handleOutlineConfirm}
+        onConfirmDimensions={handleConfirmDimensions}
         onCancel={() => setFloorPlanModal(null)}
         unit={unit} UNITS={UNITS} toMeters={toMeters} fmt={fmt} metersTo={metersTo}
       />
@@ -2613,7 +2855,7 @@ export default function BoothPlannerV2() {
           const catItems = catalog.filter((c) => (c.category || "Models") === cat && c.category !== "Props");
           const catCount = items.filter((it) => it.kind === "model" && catItems.some((c) => c.id === it.catalogId)).length;
           return (
-            <Section key={cat} title={cat} defaultOpen={false} badge={catCount > 0 ? catCount : null}>
+            <Section key={cat} title={cat} defaultOpen={false} badge={catCount > 0 ? catCount : null} visible={layerVisibility.models} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, models: !v.models }))}>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {catItems.map((c) => {
                   const thumb = thumbnails[c.id];
@@ -2658,7 +2900,7 @@ export default function BoothPlannerV2() {
         })}
 
         {/* Primitives */}
-        <Section title="Primitives" defaultOpen={false} badge={items.filter((it) => it.kind === "primitive").length || null}>
+        <Section title="Primitives" defaultOpen={false} badge={items.filter((it) => it.kind === "primitive").length || null} visible={layerVisibility.primitives} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, primitives: !v.primitives }))}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {PRIMITIVES.map((p) => {
               const PRIM_ICONS = {
@@ -2681,7 +2923,7 @@ export default function BoothPlannerV2() {
         </Section>
 
         {/* Props & Accessories */}
-        <Section title="Props & Accessories" defaultOpen={false} badge={items.filter((it) => it.kind === "prop").length || null}>
+        <Section title="Props & Accessories" defaultOpen={false} badge={items.filter((it) => it.kind === "prop").length || null} visible={layerVisibility.props} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, props: !v.props }))}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
             {[...PROPS, ...catalog.filter((c) => c.category === "Props")].map((p) => {
               const count = itemCounts[p.id] || 0;
@@ -2718,7 +2960,7 @@ export default function BoothPlannerV2() {
         )}
 
         {/* Walls & Structure */}
-        <Section title="Walls & Structure" defaultOpen={false} badge={walls.length || null}>
+        <Section title="Walls & Structure" defaultOpen={false} badge={walls.length || null} visible={layerVisibility.walls} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, walls: !v.walls }))}>
           <button onClick={() => {
             setWallToolActive((v) => {
               if (v) { wallStateRef.current = { active: false, start: null, end: null }; threeRef.current.clearWallGhost && threeRef.current.clearWallGhost(); }
@@ -2919,15 +3161,14 @@ export default function BoothPlannerV2() {
               <div>Ctrl/Cmd + D: duplicate</div>
               <div>Ctrl/Cmd + Z: undo · Ctrl/Cmd + Y: redo</div>
               <div>Shift+click: add/remove from selection</div>
-              <div>Right-click + drag: orbit camera</div>
+              <div>Right-click + drag: orbit · Middle-click: pan</div>
             </>
           ) : (
             <>
-              <div>Click: select/move</div>
+              <div>Click: select · Drag: move</div>
               <div>Shift+click: multi-select</div>
               <div>Right-click + drag: orbit camera</div>
-              <div>Middle-click + drag: pan</div>
-              <div>Scroll: zoom</div>
+              <div>Middle-click + drag: pan · Scroll: zoom</div>
             </>
           )}
         </div>
@@ -2989,21 +3230,67 @@ export default function BoothPlannerV2() {
           </div>
 
           {/* Group card */}
-          {selectedItem.groupId && (
-            <div style={{ background: "#0e1a14", border: "1px solid #1a3a28", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                <span style={{ fontSize: 11, color: "#4ade80", fontWeight: 600 }}>{selectedUids.length > 1 ? "Whole group selected" : "Part of a group"}</span>
+          {(() => {
+            const selItems = items.filter((it) => selectedUids.includes(it.uid));
+            const allSameGroup = selItems.length > 1 && selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
+            const hasAnyGroup = selItems.some((it) => it.groupId);
+            const isPartOfGroup = selectedUids.length === 1 && selectedItem?.groupId;
+
+            // single item in a group
+            if (isPartOfGroup) return (
+              <div style={{ background: "#0e1a14", border: "1px solid #1a3a28", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                  <span style={{ fontSize: 11, color: "#4ade80", fontWeight: 600 }}>Part of a group</span>
+                </div>
+                <div style={{ fontSize: 10, color: "#64748b", marginBottom: 8, lineHeight: 1.5 }}>Click any piece = select group · Double-click = this piece only</div>
+                <button onClick={() => setItems((prev) => prev.map((it) => it.uid === selectedItem.uid ? { ...it, groupId: null } : it))}
+                  style={{ width: "100%", background: "#13162a", border: "1px solid #1e2035", borderRadius: 7, color: "#94a3b8", padding: "6px", fontSize: 11, cursor: "pointer", fontWeight: 500 }}>
+                  Remove from group
+                </button>
               </div>
-              <div style={{ fontSize: 10, color: "#64748b", marginBottom: 8, lineHeight: 1.5 }}>
-                {selectedUids.length > 1 ? "← → rotates around pivot · Shift+← → rotates each in place" : "Click any piece = select group · Double-click = this piece only"}
+            );
+
+            // multi-selection
+            if (selectedUids.length > 1) return (
+              <div style={{ background: "#0e1a14", border: "1px solid #1a3a28", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                  <span style={{ fontSize: 11, color: "#4ade80", fontWeight: 600 }}>
+                    {allSameGroup ? "Whole group selected" : `${selectedUids.length} objects selected`}
+                  </span>
+                </div>
+                {allSameGroup && (
+                  <div style={{ fontSize: 10, color: "#64748b", marginBottom: 8, lineHeight: 1.5 }}>
+                    ← → rotates around pivot · Shift+← → rotates each in place
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 6 }}>
+                  {!allSameGroup && (
+                    <button onClick={() => {
+                      const groupId = `group_${Date.now()}`;
+                      const cx = selItems.reduce((s, it) => s + it.x, 0) / selItems.length;
+                      const cz = selItems.reduce((s, it) => s + it.z, 0) / selItems.length;
+                      setItems((prev) => prev.map((it) => selectedUids.includes(it.uid)
+                        ? { ...it, groupId, pivotX: cx, pivotZ: cz }
+                        : it));
+                    }}
+                      style={{ flex: 1, background: "#5b4bff", border: "none", borderRadius: 7, color: "#fff", padding: "7px", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>
+                      Group
+                    </button>
+                  )}
+                  {hasAnyGroup && (
+                    <button onClick={() => setItems((prev) => prev.map((it) => selectedUids.includes(it.uid) ? { ...it, groupId: null } : it))}
+                      style={{ flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 7, color: "#94a3b8", padding: "7px", fontSize: 11, cursor: "pointer", fontWeight: 500 }}>
+                      Ungroup
+                    </button>
+                  )}
+                </div>
               </div>
-              <button onClick={() => setItems((prev) => prev.map((it) => selectedUids.includes(it.uid) ? { ...it, groupId: null } : it))}
-                style={{ width: "100%", background: "#13162a", border: "1px solid #1e2035", borderRadius: 7, color: "#94a3b8", padding: "6px", fontSize: 11, cursor: "pointer", fontWeight: 500 }}>
-                Ungroup {selectedUids.length > 1 ? "selection" : "this piece"}
-              </button>
-            </div>
-          )}
+            );
+
+            return null;
+          })()}
 
           {/* Position */}
           {selectedUids.length === 1 && (
@@ -3131,10 +3418,14 @@ export default function BoothPlannerV2() {
                         </div>
                       </div>
                       {isLamp && isOn && (
-                        <div style={{ borderTop: "1px solid #1e2035", padding: "8px 12px" }}>
+                        <div style={{ borderTop: "1px solid #1e2035", padding: "8px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
                           <button onClick={() => { const sc = selectedItem.sockets[sName]; if (!sc) return; setItems((prev) => prev.map((it) => it.uid !== selectedItem.uid && it.catalogId === selectedItem.catalogId ? { ...it, sockets: { ...it.sockets, [sName]: sc } } : it)); }}
                             style={{ width: "100%", background: "#13162a", border: `1px solid ${accentColor}33`, borderRadius: 7, color: accentColor, fontSize: 10, padding: "6px", cursor: "pointer", fontWeight: 600 }}>
                             Apply to all {selectedDef.name}
+                          </button>
+                          <button onClick={() => setItems((prev) => prev.map((it) => it.catalogId === selectedItem.catalogId ? { ...it, sockets: { ...it.sockets, [sName]: null } } : it))}
+                            style={{ width: "100%", background: "#13162a", border: "1px solid #2a2f4a", borderRadius: 7, color: "#64748b", fontSize: 10, padding: "6px", cursor: "pointer", fontWeight: 600 }}>
+                            Turn off all {selectedDef.name}
                           </button>
                         </div>
                       )}
@@ -3223,16 +3514,18 @@ export default function BoothPlannerV2() {
 
         {/* Model chips — one per catalogId that has items */}
         {Object.entries(itemCounts).filter(([, count]) => count > 0).map(([catalogId, count]) => {
-          const def = findDef(
-            items.find((it) => it.catalogId === catalogId)?.kind || "model",
-            catalogId
-          );
+          const it = items.find((it) => it.catalogId === catalogId);
+          const kind = it?.kind || "model";
+          // hide chip if layer is hidden
+          if (kind === "model" && !layerVisibility.models) return null;
+          if (kind === "primitive" && !layerVisibility.primitives) return null;
+          if (kind === "prop" && !layerVisibility.props) return null;
+          const def = findDef(kind, catalogId);
           if (!def) return null;
           const thumb = thumbnails[catalogId];
           const color = catalogColors[catalogId] || def.color || "#1e2035";
           return (
             <div key={catalogId} style={{ display: "flex", alignItems: "center", gap: 6, background: "#13162a", border: "1px solid #1e2035", borderRadius: 20, padding: "4px 10px 4px 4px", flexShrink: 0 }}>
-              {/* Mini thumbnail */}
               <div style={{ width: 28, height: 28, borderRadius: 14, overflow: "hidden", flexShrink: 0, background: color }}>
                 {thumb
                   ? <img src={thumb} alt={def.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
@@ -3248,7 +3541,7 @@ export default function BoothPlannerV2() {
         })}
 
         {/* Walls chip */}
-        {walls.length > 0 && (
+        {walls.length > 0 && layerVisibility.walls && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, background: "#13162a", border: "1px solid #1e2035", borderRadius: 20, padding: "4px 10px 4px 8px", flexShrink: 0 }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>
             <span style={{ fontSize: 11, color: "#e2e8f0", fontWeight: 500 }}>Walls</span>
@@ -3298,7 +3591,7 @@ function ModelDragArea({ def, kind, libraryReady, thumb, color, onDragStart }) {
   );
 }
 
-function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onCancel, unit, UNITS, toMeters, fmt, metersTo }) {
+function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirmDimensions, onCancel, unit, UNITS, toMeters, fmt, metersTo }) {
   const canvasRef = React.useRef(null);
   const [localUnit, setLocalUnit] = React.useState(unit);
   const [zoom, setZoom] = React.useState(1);
@@ -3376,7 +3669,15 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onCancel,
 
   const handleWheel = (e) => {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 0.85 : 1.18;
+    const normY = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+    const normX = e.deltaMode === 1 ? e.deltaX * 20 : e.deltaMode === 2 ? e.deltaX * 400 : e.deltaX;
+    // dos dedos con componente horizontal = pan
+    if (Math.abs(normX) > Math.abs(normY) * 0.3 && !e.ctrlKey) {
+      setPan((p) => ({ x: p.x - normX * 0.5, y: p.y - normY * 0.5 }));
+      return;
+    }
+    // zoom normalizado
+    const factor = normY > 0 ? 0.92 : 1.09;
     setZoom((z) => Math.min(Math.max(z * factor, 0.2), 8));
   };
 
@@ -3479,32 +3780,164 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onCancel,
             </button>
           </div>
         )}
+        {modal.step === 'confirm' && <ConfirmDimensionsStep modal={modal} onConfirm={onConfirmDimensions} unit={unit} UNITS={UNITS} fmt={fmt} metersTo={metersTo} toMeters={toMeters} />}
       </div>
     </div>
   );
 }
 
-function Section({ title, children, badge, defaultOpen = true }) {
+function ConfirmDimensionsStep({ modal, onConfirm, unit, UNITS, fmt, metersTo, toMeters }) {
+  const [w, setW] = React.useState(modal.calcW);
+  const [d, setD] = React.useState(modal.calcD);
+  const [localUnit, setLocalUnit] = React.useState(unit);
+  const [zoom, setZoom] = React.useState(1);
+  const [pan, setPan] = React.useState({ x: 0, y: 0 });
+  const isPanning = React.useRef(false);
+  const lastPan = React.useRef({ x: 0, y: 0 });
+  const imgRef = React.useRef(null);
+  const containerRef = React.useRef(null);
+  const unitLabel = UNITS[localUnit]?.label || "m";
+
+  // fit image on load
+  React.useEffect(() => {
+    const img = new Image();
+    img.onload = () => {
+      const cw = 496, ch = 280;
+      const scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight) * 0.9;
+      setZoom(scale);
+      setPan({ x: (cw - img.naturalWidth * scale) / 2, y: (ch - img.naturalHeight * scale) / 2 });
+    };
+    img.src = modal.dataUrl;
+  }, [modal.dataUrl]);
+
+  const handleWheel = (e) => {
+    e.preventDefault();
+    const normY = e.deltaMode === 1 ? e.deltaY * 20 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+    const normX = e.deltaMode === 1 ? e.deltaX * 20 : e.deltaMode === 2 ? e.deltaX * 400 : e.deltaX;
+    if (Math.abs(normX) > Math.abs(normY) * 0.3 && !e.ctrlKey) {
+      setPan((p) => ({ x: p.x - normX * 0.5, y: p.y - normY * 0.5 }));
+      return;
+    }
+    const factor = normY > 0 ? 0.92 : 1.09;
+    setZoom((z) => Math.min(Math.max(z * factor, 0.1), 10));
+  };
+
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, []);
+
+  const handleMouseDown = (e) => { isPanning.current = true; lastPan.current = { x: e.clientX, y: e.clientY }; };
+  const handleMouseMove = (e) => {
+    if (!isPanning.current) return;
+    const dx = e.clientX - lastPan.current.x, dy = e.clientY - lastPan.current.y;
+    lastPan.current = { x: e.clientX, y: e.clientY };
+    setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+  };
+  const handleMouseUp = () => { isPanning.current = false; };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 3000, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 16, padding: 28, width: 560, maxWidth: "90vw" }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <div style={{ width: 3, height: 24, background: "#5b4bff", borderRadius: 2 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0" }}>Confirm floor size</div>
+            <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>Check the plan for dimensions and adjust if needed</div>
+          </div>
+          {/* Unit selector */}
+          <div style={{ display: "flex", gap: 4 }}>
+            {Object.keys(UNITS).map((u) => (
+              <button key={u} onClick={() => setLocalUnit(u)} style={{
+                padding: "4px 10px", fontSize: 11, fontWeight: 600, borderRadius: 6,
+                border: `1px solid ${localUnit === u ? "#5b4bff" : "#1e2035"}`,
+                background: localUnit === u ? "#5b4bff" : "#0d0f18",
+                color: localUnit === u ? "#fff" : "#64748b", cursor: "pointer",
+              }}>{UNITS[u].label}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Floor plan image with zoom/pan */}
+        <div ref={containerRef}
+          onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
+          style={{ background: "#0d0f18", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", marginBottom: 16, height: 280, position: "relative", cursor: "grab" }}>
+          <div style={{ position: "absolute", top: 0, left: 0, transformOrigin: "0 0", transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
+            <img ref={imgRef} src={modal.dataUrl} alt="Floor plan" style={{ display: "block", maxWidth: "none" }} />
+          </div>
+          <div style={{ position: "absolute", bottom: 8, right: 8, display: "flex", gap: 4 }}>
+            <button onMouseDown={(e) => e.stopPropagation()} onClick={() => setZoom(z => Math.min(z * 1.3, 10))}
+              style={{ width: 26, height: 26, background: "rgba(13,15,24,0.8)", border: "1px solid #1e2035", borderRadius: 6, color: "#e2e8f0", cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
+            <button onMouseDown={(e) => e.stopPropagation()} onClick={() => setZoom(z => Math.max(z * 0.77, 0.1))}
+              style={{ width: 26, height: 26, background: "rgba(13,15,24,0.8)", border: "1px solid #1e2035", borderRadius: 6, color: "#e2e8f0", cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+          </div>
+        </div>
+
+        {/* Dimension inputs */}
+        <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Width ({unitLabel})</div>
+            <input type="number" min="0.1" step="0.1"
+              value={fmt(metersTo(w, localUnit))}
+              onChange={(e) => setW(toMeters(parseFloat(e.target.value) || 0.1, localUnit))}
+              style={{ width: "100%", background: "#0d0f18", border: "1px solid #5b4bff", borderRadius: 8, color: "#e2e8f0", padding: "10px 12px", fontSize: 16, fontWeight: 600, textAlign: "center", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end", paddingBottom: 10, color: "#475569", fontSize: 20 }}>×</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Depth ({unitLabel})</div>
+            <input type="number" min="0.1" step="0.1"
+              value={fmt(metersTo(d, localUnit))}
+              onChange={(e) => setD(toMeters(parseFloat(e.target.value) || 0.1, localUnit))}
+              style={{ width: "100%", background: "#0d0f18", border: "1px solid #5b4bff", borderRadius: 8, color: "#e2e8f0", padding: "10px 12px", fontSize: 16, fontWeight: 600, textAlign: "center", boxSizing: "border-box" }} />
+          </div>
+        </div>
+
+        {/* Confirm */}
+        <button onClick={() => onConfirm(w, d)}
+          style={{ width: "100%", background: "#5b4bff", border: "none", borderRadius: 8, color: "#fff", padding: "12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          ✓ Confirm — {fmt(metersTo(w, localUnit))} × {fmt(metersTo(d, localUnit))} {unitLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children, badge, defaultOpen = true, visible, onVisibilityToggle }) {
   const [open, setOpen] = React.useState(defaultOpen);
+  const hasVisibility = visible !== undefined;
   return (
     <div style={{ borderBottom: "1px solid #1e2035" }}>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "none", border: "none", color: "#e2e8f0", cursor: "pointer" }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em" }}>{title}</span>
-          {badge != null && (
-            <span style={{ background: "#5b4bff", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 7px", minWidth: 18, textAlign: "center" }}>{badge}</span>
-          )}
-        </div>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-          style={{ transition: "transform 0.2s", transform: open ? "rotate(0deg)" : "rotate(-90deg)", opacity: 0.5 }}>
-          <polyline points="6,9 12,15 18,9"/>
-        </svg>
-      </button>
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "none", border: "none", color: "#e2e8f0", cursor: "pointer" }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em", color: hasVisibility && !visible ? "#475569" : "#e2e8f0" }}>{title}</span>
+            {badge != null && (
+              <span style={{ background: "#5b4bff", color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 7px", minWidth: 18, textAlign: "center" }}>{badge}</span>
+            )}
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            style={{ transition: "transform 0.2s", transform: open ? "rotate(0deg)" : "rotate(-90deg)", opacity: 0.5 }}>
+            <polyline points="6,9 12,15 18,9"/>
+          </svg>
+        </button>
+        {hasVisibility && (
+          <div onClick={(e) => { e.stopPropagation(); onVisibilityToggle(); }}
+            style={{ flexShrink: 0, marginRight: 12, display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+            <span style={{ fontSize: 10, color: visible ? "#64748b" : "#475569", fontWeight: 500 }}>{visible ? "Hide" : "Show"}</span>
+            <div style={{ width: 36, height: 20, background: visible ? "#5b4bff" : "#1e2035", border: visible ? "none" : "1px solid #2a2f4a", borderRadius: 10, position: "relative", flexShrink: 0 }}>
+              <div style={{ width: 16, height: 16, background: visible ? "#fff" : "#475569", borderRadius: "50%", position: "absolute", top: 2, left: visible ? 18 : 2, transition: "left 0.15s" }} />
+            </div>
+          </div>
+        )}
+      </div>
       {open && (
-        <div style={{ padding: "0 16px 16px 16px" }}>{children}</div>
+        <div style={{ padding: "0 16px 16px 16px", opacity: hasVisibility && !visible ? 0.4 : 1 }}>{children}</div>
       )}
     </div>
   );
