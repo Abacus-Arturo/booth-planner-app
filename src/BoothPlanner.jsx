@@ -1898,7 +1898,9 @@ export default function BoothPlannerV2() {
   const loadedUidsRef = useRef(new Set()); // evita relanzar la carga si ya se está cargando ese uid
 
   const PAINT_MATERIAL_NAME = "paint_color";
-  const applyColorToContainer = (container, color) => {
+  const applyColorToContainer = (container, color, def) => {
+    // si el modelo tiene paintable: false, no teñir nada
+    if (def && def.paintable === false) return;
     // primero recolectar TODOS los nombres de materiales del modelo completo
     const allMatNames = new Set();
     container.traverse((child) => {
@@ -1977,7 +1979,7 @@ export default function BoothPlannerV2() {
             container.remove(placeholder);
             placeholder.geometry.dispose(); placeholder.material.dispose();
             container.add(root);
-            applyColorToContainer(root, it.color || def.color || "#888888");
+            applyColorToContainer(root, it.color || def.color || "#888888", def);
             applySocketVisibility(root, it.sockets);
             // calcular el bounding box en espacio LOCAL del root (antes de la rotación del container)
             // para que el outline siempre tenga el tamaño correcto sin importar la rotación
@@ -2052,7 +2054,7 @@ export default function BoothPlannerV2() {
       if (container.userData.outline) container.userData.outline.visible = isSelected;
 
       if (realModel) {
-        applyColorToContainer(realModel, it.color || def.color || "#888888");
+        applyColorToContainer(realModel, it.color || def.color || "#888888", def);
         // apply sockets: visibility for simple ones, shelf array for repeatable ones
         (def.sockets || []).forEach((socketDef) => {
           const sName = getSocketName(socketDef);
@@ -3442,13 +3444,20 @@ export default function BoothPlannerV2() {
               <div>Ctrl/Cmd + D: duplicate</div>
               <div>Ctrl/Cmd + Z: undo · Ctrl/Cmd + Y: redo</div>
               <div>Shift+click: add/remove from selection</div>
+              <div style={{ marginTop: 4, color: "#475569", fontSize: 10 }}>Mac</div>
+              <div>Right-click or Alt + drag: orbit · Ctrl + drag: pan</div>
+              <div style={{ marginTop: 4, color: "#475569", fontSize: 10 }}>PC</div>
               <div>Right-click + drag: orbit · Middle-click: pan</div>
             </>
           ) : (
             <>
               <div>Click: select · Drag: move</div>
               <div>Shift+click: multi-select</div>
-              <div>Right-click + drag: orbit camera</div>
+              <div style={{ marginTop: 4, color: "#475569", fontSize: 10 }}>Mac</div>
+              <div>Right-click or Alt + drag: orbit</div>
+              <div>Ctrl + drag: pan · Scroll: zoom</div>
+              <div style={{ marginTop: 4, color: "#475569", fontSize: 10 }}>PC</div>
+              <div>Right-click + drag: orbit</div>
               <div>Middle-click + drag: pan · Scroll: zoom</div>
             </>
           )}
