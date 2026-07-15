@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
-//Comment
 
 // ===================== Units =====================
 const UNITS = {
@@ -42,6 +41,26 @@ function getSocketName(s) { return typeof s === "string" ? s : s.name; }
 function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
 
 function buildWallMesh(wall) {
+  // Column
+  if (wall.type === "column") {
+    const group = new THREE.Group();
+    group.position.set(wall.x, 0, wall.z);
+    if (wall.rotY) group.rotation.y = wall.rotY;
+    const mat = new THREE.MeshStandardMaterial({ color: wall.color || "#cccccc", roughness: 0.7, metalness: 0.05 });
+    let geo;
+    if (wall.shape === "circular") {
+      geo = new THREE.CylinderGeometry(wall.radius, wall.radius, wall.height, 32);
+    } else {
+      geo = new THREE.BoxGeometry(wall.width, wall.height, wall.depth);
+    }
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.y = wall.height / 2;
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    group.add(mesh);
+    group.userData.isWall = true;
+    return group;
+  }
+  // Wall
   const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
   const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
   const angle = Math.atan2(dx, dz) - Math.PI / 2;
@@ -420,13 +439,16 @@ export default function BoothPlannerV2() {
   useEffect(() => { floorDRef.current = floorD; }, [floorD]);
 
   // Floor appearance
-  const [floorColor, setFloorColor] = useState("#e9e9e9");
+  const [floorColor, setFloorColor] = useState("#212121");
 
   // Floor plan image
   const [floorPlan, setFloorPlan] = useState(null); // { dataUrl, realW, realH, opacity, x, z, visible }
   const [floorPlanModal, setFloorPlanModal] = useState(null); // { step: 'calibrate'|'outline', dataUrl, ... }
   const floorPlanFileRef = useRef(null);
-  const [manifestUrl, setManifestUrl] = useState("https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/main/models/manifest.json");
+  const DEFAULT_MANIFEST_URL = window.location.pathname.includes('/dev/')
+    ? 'https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/dev/models/manifest.json'
+    : 'https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/main/models/manifest.json';
+  const [manifestUrl, setManifestUrl] = useState(DEFAULT_MANIFEST_URL);
   const [catalog, setCatalog] = useState(DEFAULT_MANIFEST);
   const findDef = useCallback((kindCategory, catalogId) => {
     if (kindCategory === "model") return catalog.find((c) => c.id === catalogId);
@@ -468,15 +490,29 @@ export default function BoothPlannerV2() {
   const [showReplaceMenu, setShowReplaceMenu] = useState(false);
   const [pendingLineDef, setPendingLineDef] = useState(null); // {def, kind}
   const [wallToolActive, setWallToolActive] = useState(false);
+  const wallSessionIdRef = useRef(null);
   const [floorDark, setFloorDark] = useState(false);
-  const floorColorRef = useRef("#e9e9e9");
+  const floorColorRef = useRef("#212121");
   useEffect(() => { floorColorRef.current = floorColor; }, [floorColor]);
   const [measureToolActive, setMeasureToolActive] = useState(false);
   const measureToolActiveRef = useRef(false);
   useEffect(() => { measureToolActiveRef.current = measureToolActive; }, [measureToolActive]);
   const measureStateRef = useRef({ active: false, start: null, measures: [] });
   const [wallConfig, setWallConfig] = useState({ height: 2.4, glassRatio: 0, thickness: 0.1, color: "#cccccc" });
+  const [columnConfig, setColumnConfig] = useState({ shape: "square", radius: 0.15, width: 0.3, depth: 0.3, height: 2.4, color: "#cccccc" });
+  const [columnToolActive, setColumnToolActive] = useState(false);
+  const columnToolActiveRef = useRef(false);
+  useEffect(() => { columnToolActiveRef.current = columnToolActive; }, [columnToolActive]);
+  const columnConfigRef = useRef(columnConfig);
+  useEffect(() => { columnConfigRef.current = columnConfig; }, [columnConfig]);
+  const columnLastClickRef = useRef(0);
   const [layerVisibility, setLayerVisibility] = useState({ models: true, primitives: true, props: true, walls: true });
+  const [layerLock, setLayerLock] = useState({ models: false, primitives: false, props: false, walls: false });
+  const [showSceneList, setShowSceneList] = useState(false);
+  const [rightPanelTab, setRightPanelTab] = useState('properties'); // 'properties' | 'scene'
+
+  const layerLockRef = useRef({ models: false, primitives: false, props: false, walls: false });
+  useEffect(() => { layerLockRef.current = layerLock; }, [layerLock]);
   const [hiddenCatalogIds, setHiddenCatalogIds] = useState(new Set());
   const [appSettings, setAppSettings] = useState({ animations: true });
   const [showSettings, setShowSettings] = useState(false);
@@ -619,7 +655,7 @@ export default function BoothPlannerV2() {
     // ---- Floor ----
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshStandardMaterial({ color: 0xe9e9e9, roughness: 0.85, metalness: 0.05 })
+      new THREE.MeshStandardMaterial({ color: 0x212121, roughness: 0.85, metalness: 0.05 })
     );
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
@@ -734,7 +770,7 @@ export default function BoothPlannerV2() {
       updateCamera();
     };
     const onCtx = (e) => e.preventDefault();
-    const onMouseLeave = () => { hoverSphere.visible = false; hoveredUid = null; };
+    const onMouseLeave = () => { hoverSphere.visible = false; hoveredUid = null; hideColumnGhost(); };
     dom.addEventListener("pointerdown", onDown);
     window.addEventListener("pointermove", onMoveOrbit);
     window.addEventListener("pointerup", onUp);
@@ -794,7 +830,21 @@ export default function BoothPlannerV2() {
     measureStartDot.renderOrder = 997;
     scene.add(measureStartDot);
 
-    // Hover indicator — esferita que aparece arriba del objeto bajo el cursor
+    // Column ghost
+    const columnGhostMat = new THREE.MeshStandardMaterial({ color: 0xc4622d, transparent: true, opacity: 0.35 });
+    let columnGhostMesh = null;
+    const updateColumnGhost = (x, z) => {
+      if (columnGhostMesh) scene.remove(columnGhostMesh);
+      const cfg = columnConfigRef.current;
+      let geo;
+      if (cfg.shape === "circular") geo = new THREE.CylinderGeometry(cfg.radius, cfg.radius, cfg.height, 32);
+      else geo = new THREE.BoxGeometry(cfg.width, cfg.height, cfg.depth);
+      columnGhostMesh = new THREE.Mesh(geo, columnGhostMat);
+      columnGhostMesh.position.set(x, cfg.height / 2, z);
+      columnGhostMesh.raycast = () => {};
+      scene.add(columnGhostMesh);
+    };
+    const hideColumnGhost = () => { if (columnGhostMesh) { scene.remove(columnGhostMesh); columnGhostMesh = null; } };
     const hoverSphereMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false, transparent: true, opacity: 0.9 });
     const hoverSphere = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 12), hoverSphereMat);
     hoverSphere.visible = false;
@@ -861,6 +911,7 @@ export default function BoothPlannerV2() {
     let draggingWallUid = null;
     let wallDragStartPt = null;
     let wallDragOrigX1 = 0, wallDragOrigZ1 = 0, wallDragOrigX2 = 0, wallDragOrigZ2 = 0;
+    let wallDragGroupOrig = {}; // uid -> {x1,z1,x2,z2} for grouped walls
     let dragArmed = false; // solo cuenta como "arrastre" real una vez que pasas el umbral de píxeles
     let dragStartScreenX = 0, dragStartScreenY = 0;
     const DRAG_THRESHOLD_PX = 5;
@@ -901,6 +952,24 @@ export default function BoothPlannerV2() {
 
     const onDownSelect = (e) => {
       if (e.button !== 0) return;
+      if (e.altKey || e.ctrlKey) return;
+      // ---- Column tool ----
+      if (columnToolActiveRef.current) {
+        const now = Date.now();
+        if (now - (columnLastClickRef.current || 0) < 300) return; // ignore second click of dblclick
+        columnLastClickRef.current = now;
+        const raw = groundPoint(e.clientX, e.clientY);
+        const cfg = columnConfigRef.current;
+        const uid = `col_${Date.now()}`;
+        setWalls((prev) => [...prev, {
+          uid, type: "column",
+          x: raw.x, z: raw.z,
+          shape: cfg.shape, radius: cfg.radius,
+          width: cfg.width, depth: cfg.depth,
+          height: cfg.height, color: cfg.color,
+        }]);
+        return;
+      }
       // ---- Wall tool flow ----
       if (measureToolActiveRef.current) {
         const raw = groundPoint(e.clientX, e.clientY);
@@ -949,7 +1018,8 @@ export default function BoothPlannerV2() {
           if (len > 0.05) {
             const cfg = wallConfigRef.current;
             const uid = `wall_${Date.now()}`;
-            threeRef.current.commitWall({ uid, x1: ws.start.x, z1: ws.start.z, x2: ws.end.x, z2: ws.end.z, ...cfg });
+            const groupId = wallSessionIdRef.current;
+            threeRef.current.commitWall({ uid, x1: ws.start.x, z1: ws.start.z, x2: ws.end.x, z2: ws.end.z, groupId, ...cfg });
             ws.start = ws.end.clone();
             ws.end = ws.start.clone();
             snapIndicator.visible = false;
@@ -1008,7 +1078,13 @@ export default function BoothPlannerV2() {
           }
           if (h && (h.userData.isWallHandle || h.userData.isLineHandle || h.userData.isArrayHandle)) {
             if (h.userData.isWallHandle) {
-              draggingWallHandleRef.current = { type: 'wall', wallUid: h.userData.wallUid, endpoint: h.userData.endpoint };
+              if (h.userData.isColumnHandle) {
+                draggingWallHandleRef.current = { type: 'columnScale', wallUid: h.userData.wallUid, axis: h.userData.axis, dir: h.userData.dir };
+              } else if (h.userData.isColumnMove) {
+                draggingWallHandleRef.current = { type: 'columnMove', wallUid: h.userData.wallUid };
+              } else {
+                draggingWallHandleRef.current = { type: 'wall', wallUid: h.userData.wallUid, endpoint: h.userData.endpoint };
+              }
             } else if (h.userData.isLineHandle) {
               const groupId = h.userData.groupId;
               const groupItems = itemsRef.current.filter((it) => it.groupId === groupId);
@@ -1024,6 +1100,11 @@ export default function BoothPlannerV2() {
                 threeRef.current.setArrayHandleActive(true);
                 draggingWallHandleRef.current = { type: 'array', groupId };
                 h.visible = false;
+                // ocultar todos los items del grupo
+                groupItems.forEach((it) => {
+                  const c = itemGroup.children.find((c) => c.userData.uid === it.uid);
+                  if (c) c.visible = false;
+                });
               }
             } else if (h.userData.isArrayHandle) {
               if (h.userData.sourceGroupId) {
@@ -1033,8 +1114,8 @@ export default function BoothPlannerV2() {
                   const pivotItem = groupItems.find((it) => it.pivotX != null) || groupItems[0];
                   arrayHandleActiveRef.current = true;
                   arrayHandleSourceRef.current = { ...pivotItem, _isGroupArray: true, _groupUids: groupUids };
-                  lineCountRef.current = 2;
-                  threeRef.current.setLineCountUI(2);
+                  lineCountRef.current = 1;
+                  threeRef.current.setLineCountUI(1);
                   threeRef.current.setArrayHandleActive(true);
                   draggingWallHandleRef.current = { type: 'array' };
                   h.visible = false;
@@ -1044,8 +1125,8 @@ export default function BoothPlannerV2() {
                 if (srcItem) {
                   arrayHandleActiveRef.current = true;
                   arrayHandleSourceRef.current = { ...srcItem };
-                  lineCountRef.current = 2;
-                  threeRef.current.setLineCountUI(2);
+                  lineCountRef.current = 1;
+                  threeRef.current.setLineCountUI(1);
                   threeRef.current.setArrayHandleActive(true);
                   draggingWallHandleRef.current = { type: 'array' };
                   h.visible = false;
@@ -1062,12 +1143,18 @@ export default function BoothPlannerV2() {
       const wallHits = raycaster.intersectObjects(wallGroup.children, true).filter((h) => {
         let obj = h.object;
         while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
-        return obj.visible;
+        return obj.visible && !layerLockRef.current.walls;
       });
       const hits = raycaster.intersectObjects(itemGroup.children, true).filter((h) => {
         let obj = h.object;
         while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
-        return obj.visible;
+        if (!obj.visible) return false;
+        const it = itemsRef.current.find((i) => i.uid === obj.userData.uid);
+        if (!it) return true;
+        if (it.kind === "model" && layerLockRef.current.models) return false;
+        if (it.kind === "primitive" && layerLockRef.current.primitives) return false;
+        if (it.kind === "prop" && layerLockRef.current.props) return false;
+        return true;
       });
       // solo seleccionar pared si está más cerca que cualquier objeto
       if (wallHits.length && (!hits.length || wallHits[0].distance < hits[0].distance)) {
@@ -1076,15 +1163,27 @@ export default function BoothPlannerV2() {
         const wuid = obj.userData.wallUid;
         threeRef.current.setSelectedWall(wuid);
         threeRef.current.setSelected(null);
-        // preparar drag de la pared
         const wallData = wallsRef.current.find((w) => w.uid === wuid);
         if (wallData) {
           draggingWallUid = wuid;
           dragArmed = false;
           dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
           wallDragStartPt = groundPoint(e.clientX, e.clientY);
-          wallDragOrigX1 = wallData.x1; wallDragOrigZ1 = wallData.z1;
-          wallDragOrigX2 = wallData.x2; wallDragOrigZ2 = wallData.z2;
+          if (wallData.type === "column") {
+            wallDragOrigX1 = wallData.x; wallDragOrigZ1 = wallData.z;
+            wallDragOrigX2 = wallData.x; wallDragOrigZ2 = wallData.z;
+          } else if (wallData.groupId) {
+            // store all walls in the group
+            wallDragGroupOrig = {};
+            wallsRef.current.filter((w) => w.groupId === wallData.groupId).forEach((w) => {
+              wallDragGroupOrig[w.uid] = { x1: w.x1, z1: w.z1, x2: w.x2, z2: w.z2 };
+            });
+            wallDragOrigX1 = wallData.x1; wallDragOrigZ1 = wallData.z1;
+            wallDragOrigX2 = wallData.x2; wallDragOrigZ2 = wallData.z2;
+          } else {
+            wallDragOrigX1 = wallData.x1; wallDragOrigZ1 = wallData.z1;
+            wallDragOrigX2 = wallData.x2; wallDragOrigZ2 = wallData.z2;
+          }
         }
         return;
       }
@@ -1190,10 +1289,18 @@ export default function BoothPlannerV2() {
         pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(pointer, activeCam);
         const hoverItemHits = raycaster.intersectObjects(itemGroup.children, true).filter((h) => {
-          let obj = h.object; while (obj.parent && obj.parent !== itemGroup) obj = obj.parent; return obj.visible;
+          let obj = h.object; while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
+          if (!obj.visible) return false;
+          const it = itemsRef.current.find((i) => i.uid === obj.userData.uid);
+          if (!it) return true;
+          if (it.kind === "model" && layerLockRef.current.models) return false;
+          if (it.kind === "primitive" && layerLockRef.current.primitives) return false;
+          if (it.kind === "prop" && layerLockRef.current.props) return false;
+          return true;
         });
         const hoverWallHits = raycaster.intersectObjects(wallGroup.children, true).filter((h) => {
-          let obj = h.object; while (obj.parent && obj.parent !== wallGroup) obj = obj.parent; return obj.visible;
+          let obj = h.object; while (obj.parent && obj.parent !== wallGroup) obj = obj.parent;
+          return obj.visible && !layerLockRef.current.walls;
         });
         const wallCloser = hoverWallHits.length && (!hoverItemHits.length || hoverWallHits[0].distance < hoverItemHits[0].distance);
 
@@ -1234,14 +1341,24 @@ export default function BoothPlannerV2() {
 
       // ---- Wall/Line handle drag ----
       if (draggingWallHandleRef.current) {
+        const isArrayDrag = draggingWallHandleRef.current.type === 'array';
         if (!dragArmed) {
           const dx = e.clientX - dragStartScreenX, dy = e.clientY - dragStartScreenY;
-          if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+          // array: no threshold — ghosts aparecen inmediatamente
+          if (!isArrayDrag && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
           dragArmed = true;
           // ocultar items del array en el primer move real
-          if (draggingWallHandleRef.current.type === 'array' && arrayHandleSourceRef.current) {
+          if (isArrayDrag && arrayHandleSourceRef.current) {
             const src = arrayHandleSourceRef.current;
-            const uidsToHide = src._isGroupArray ? (src._groupUids || []) : [src.uid];
+            const existingGroupId = draggingWallHandleRef.current.groupId;
+            let uidsToHide = [];
+            if (src._isGroupArray) {
+              uidsToHide = src._groupUids || [];
+            } else if (existingGroupId) {
+              uidsToHide = itemsRef.current.filter((it) => it.groupId === existingGroupId).map((it) => it.uid);
+            } else {
+              uidsToHide = [src.uid];
+            }
             uidsToHide.forEach((uid) => {
               const c = itemGroup.children.find((c) => c.userData.uid === uid);
               if (c) c.visible = false;
@@ -1251,7 +1368,36 @@ export default function BoothPlannerV2() {
         const raw = groundPoint(e.clientX, e.clientY);
         const handle = draggingWallHandleRef.current;
 
-        if (handle.type === 'wall') {
+        if (handle.type === 'columnMove') {
+          setWalls((prev) => prev.map((w) => w.uid === handle.wallUid ? { ...w, x: raw.x, z: raw.z } : w));
+
+        } else if (handle.type === 'columnScale') {
+          const wall = wallsRef.current.find((w) => w.uid === handle.wallUid);
+          if (!wall) return;
+          // mover solo el lado del handle — el lado opuesto queda fijo
+          if (handle.axis === 'x') {
+            if (wall.shape === "circular") {
+              const newR = Math.max(0.05, handle.dir > 0 ? raw.x - wall.x : wall.x - raw.x);
+              setWalls((prev) => prev.map((w) => w.uid === handle.wallUid ? { ...w, radius: newR } : w));
+            } else {
+              const oppositeEdge = handle.dir > 0 ? wall.x - wall.width / 2 : wall.x + wall.width / 2;
+              const newW = Math.max(0.1, handle.dir > 0 ? raw.x - oppositeEdge : oppositeEdge - raw.x);
+              const newX = handle.dir > 0 ? oppositeEdge + newW / 2 : oppositeEdge - newW / 2;
+              setWalls((prev) => prev.map((w) => w.uid === handle.wallUid ? { ...w, width: newW, x: newX } : w));
+            }
+          } else {
+            if (wall.shape === "circular") {
+              const newR = Math.max(0.05, handle.dir > 0 ? raw.z - wall.z : wall.z - raw.z);
+              setWalls((prev) => prev.map((w) => w.uid === handle.wallUid ? { ...w, radius: newR } : w));
+            } else {
+              const oppositeEdge = handle.dir > 0 ? wall.z - wall.depth / 2 : wall.z + wall.depth / 2;
+              const newD = Math.max(0.1, handle.dir > 0 ? raw.z - oppositeEdge : oppositeEdge - raw.z);
+              const newZ = handle.dir > 0 ? oppositeEdge + newD / 2 : oppositeEdge - newD / 2;
+              setWalls((prev) => prev.map((w) => w.uid === handle.wallUid ? { ...w, depth: newD, z: newZ } : w));
+            }
+          }
+
+        } else if (handle.type === 'wall') {
           const { pt, snapped } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
           const w = wallsRef.current.find((w) => w.uid === handle.wallUid);
           const fixedPt = w ? (handle.endpoint === 'start' ? new THREE.Vector3(w.x2, 0, w.z2) : new THREE.Vector3(w.x1, 0, w.z1)) : pt;
@@ -1264,6 +1410,7 @@ export default function BoothPlannerV2() {
           const src = arrayHandleSourceRef.current;
           if (!src) return;
           const def = findDefRef.current(src.kind, src.catalogId);
+          const n = Math.max(1, lineCountRef.current);
           const origin = new THREE.Vector3(src.x, 0, src.z);
           const toMouse = new THREE.Vector3().subVectors(raw, origin);
           let dist = toMouse.length();
@@ -1275,17 +1422,24 @@ export default function BoothPlannerV2() {
             const snapUnit = def.w || 1;
             dist = Math.round(dist / snapUnit) * snapUnit;
           }
-          dist = Math.max(0.1, dist);
+          // no overlap: distancia mínima = ancho del objeto × copias
+          const minDist = (def?.w || 1) * n;
+          dist = Math.max(Math.max(0.1, dist), minDist);
           const endPt = new THREE.Vector3(
             origin.x + Math.sin(angle) * dist,
             0,
             origin.z + Math.cos(angle) * dist
           );
-          const n = Math.max(1, lineCountRef.current);
           threeRef.current.buildArrayGhosts(origin, endPt, n, src, 0);
         }
         return;
       }
+      if (columnToolActiveRef.current) {
+        const raw = groundPoint(e.clientX, e.clientY);
+        updateColumnGhost(raw.x, raw.z);
+        return;
+      }
+
       if (measureToolActiveRef.current) {
         const raw = groundPoint(e.clientX, e.clientY);
         const pt = e.shiftKey ? raw : snapMeasurePoint(raw);
@@ -1341,7 +1495,7 @@ export default function BoothPlannerV2() {
         }
         return;
       }
-      // drag de pared seleccionada
+      // drag de pared/columna seleccionada
       if (draggingWallUid) {
         if (!dragArmed) {
           const dx = e.clientX - dragStartScreenX, dy = e.clientY - dragStartScreenY;
@@ -1350,7 +1504,20 @@ export default function BoothPlannerV2() {
         }
         const pt = groundPoint(e.clientX, e.clientY);
         const dx = pt.x - wallDragStartPt.x, dz = pt.z - wallDragStartPt.z;
-        threeRef.current.moveWall(draggingWallUid, wallDragOrigX1 + dx, wallDragOrigZ1 + dz, wallDragOrigX2 + dx, wallDragOrigZ2 + dz);
+        const wall = wallsRef.current.find((w) => w.uid === draggingWallUid);
+        if (wall?.type === "column") {
+          setWalls((prev) => prev.map((w) => w.uid === draggingWallUid ? { ...w, x: wallDragOrigX1 + dx, z: wallDragOrigZ1 + dz } : w));
+        } else if (wall?.groupId) {
+          // mover todo el grupo de paredes junto
+          setWalls((prev) => prev.map((w) => {
+            if (w.groupId !== wall.groupId) return w;
+            const orig = wallDragGroupOrig[w.uid];
+            if (!orig) return w;
+            return { ...w, x1: orig.x1 + dx, z1: orig.z1 + dz, x2: orig.x2 + dx, z2: orig.z2 + dz };
+          }));
+        } else {
+          threeRef.current.moveWall(draggingWallUid, wallDragOrigX1 + dx, wallDragOrigZ1 + dz, wallDragOrigX2 + dx, wallDragOrigZ2 + dz);
+        }
         return;
       }
       if (lineStateRef.current.active) {
@@ -1400,11 +1567,86 @@ export default function BoothPlannerV2() {
         const state = threeRef.current._arrayDragState;
         const existingGroupId = draggingWallHandleRef.current.groupId;
         itemGroup.children.forEach((c) => { c.visible = true; });
+
+        // click simple sin drag — agregar una copia más
+        if (!state) {
+          const src = arrayHandleSourceRef.current;
+          if (src && !src._isGroupArray) {
+            const groupItems = existingGroupId
+              ? itemsRef.current.filter((it) => it.groupId === existingGroupId)
+              : [src];
+            const def = findDefRef.current(src.kind, src.catalogId);
+            const objWidth = def?.w || 1;
+
+            // calcular espaciado actual
+            let spacing = objWidth; // default: continuo (espaciado 0 entre bordes = ancho entre centros)
+            if (groupItems.length >= 2) {
+              const sorted = [...groupItems].sort((a, b) => {
+                const pivot = { x: groupItems[0].pivotX ?? groupItems[0].x, z: groupItems[0].pivotZ ?? groupItems[0].z };
+                return Math.hypot(a.x - pivot.x, a.z - pivot.z) - Math.hypot(b.x - pivot.x, b.z - pivot.z);
+              });
+              spacing = Math.hypot(sorted[1].x - sorted[0].x, sorted[1].z - sorted[0].z);
+            }
+
+            // dirección del array
+            const rotY = src.rotY || 0;
+            const dir = new THREE.Vector3(Math.sin(rotY + Math.PI / 2), 0, Math.cos(rotY + Math.PI / 2));
+
+            // último item del grupo
+            const lastItem = groupItems.length > 1
+              ? [...groupItems].sort((a, b) => {
+                  const px = groupItems[0].pivotX ?? groupItems[0].x;
+                  const pz = groupItems[0].pivotZ ?? groupItems[0].z;
+                  return Math.hypot(b.x - px, b.z - pz) - Math.hypot(a.x - px, a.z - pz);
+                })[0]
+              : src;
+
+            const newPos = new THREE.Vector3(
+              lastItem.x + dir.x * spacing,
+              0,
+              lastItem.z + dir.z * spacing
+            );
+
+            const groupId = existingGroupId || `line_${Date.now()}`;
+            const newItem = {
+              uid: `${src.catalogId}_${Date.now()}_click`,
+              catalogId: src.catalogId, kind: src.kind,
+              x: newPos.x, z: newPos.z, rotY: src.rotY,
+              color: varyColor(src.color || "#888888", groupItems.length),
+              sockets: { ...src.sockets }, groupId,
+              pivotX: src.pivotX ?? src.x, pivotZ: src.pivotZ ?? src.z,
+            };
+
+            if (!existingGroupId) {
+              threeRef.current.addToGroup(src.uid, groupId, src.x, src.z, src.rotY);
+            }
+            threeRef.current.commitLineItems([newItem]);
+            const allUids = [...groupItems.map((it) => it.uid), newItem.uid];
+            if (!existingGroupId) allUids.unshift(src.uid);
+            setTimeout(() => threeRef.current.setSelectedGroup(allUids), 0);
+          }
+          arrayHandleActiveRef.current = false;
+          arrayHandleSourceRef.current = null;
+          threeRef.current.setArrayHandleActive(false);
+          draggingWallHandleRef.current = null;
+          snapIndicator.visible = false;
+          return;
+        }
+
         if (state && state.n > 0) {
           const { origin, endPt, n, src } = state;
           const dir = new THREE.Vector3().subVectors(endPt, origin);
           const angle = Math.atan2(dir.x, dir.z) - Math.PI / 2;
           const baseColor = src.color || "#888888";
+
+          // no overlap: distancia mínima = ancho del objeto × n
+          const def = findDefRef.current(src.kind, src.catalogId);
+          const minDist = (def?.w || 1) * n;
+          const totalDist = origin.distanceTo(endPt);
+          const clampedEndPt = totalDist < minDist
+            ? origin.clone().addScaledVector(dir.normalize(), minDist)
+            : endPt;
+
           if (existingGroupId) {
             setItems((prev) => {
               const groupItems = prev.filter((it) => it.groupId === existingGroupId);
@@ -1413,7 +1655,7 @@ export default function BoothPlannerV2() {
               const newGroup = [];
               for (let i = 0; i < total; i++) {
                 const t = n === 0 ? 0 : i / n;
-                const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+                const pos = new THREE.Vector3().copy(origin).lerp(clampedEndPt, t);
                 const existing = groupItems[i];
                 newGroup.push(existing
                   ? { ...existing, x: pos.x, z: pos.z, rotY: angle, pivotX: origin.x, pivotZ: origin.z }
@@ -1425,19 +1667,17 @@ export default function BoothPlannerV2() {
                     pivotX: origin.x, pivotZ: origin.z,
                   });
               }
-              // seleccionar el grupo completo
               setTimeout(() => threeRef.current.setSelectedGroup(newGroup.map((it) => it.uid)), 0);
               return [...nonGroup, ...newGroup];
             });
           } else if (src._isGroupArray) {
-            // duplicar el grupo completo n veces a lo largo de la línea
             const groupUids = src._groupUids;
             const groupItems = itemsRef.current.filter((it) => groupUids.includes(it.uid));
             const allNewUids = [];
             const newItems = [];
             for (let i = 1; i <= n; i++) {
               const t = i / n;
-              const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+              const pos = new THREE.Vector3().copy(origin).lerp(clampedEndPt, t);
               const offset = new THREE.Vector3(pos.x - src.x, 0, pos.z - src.z);
               const newGroupId = `group_${Date.now()}_${i}`;
               const groupNewUids = [];
@@ -1461,7 +1701,7 @@ export default function BoothPlannerV2() {
             const newItems = [];
             for (let i = 1; i <= n; i++) {
               const t = i / n;
-              const pos = new THREE.Vector3().copy(origin).lerp(endPt, t);
+              const pos = new THREE.Vector3().copy(origin).lerp(clampedEndPt, t);
               newItems.push({
                 uid: `${src.catalogId}_${Date.now()}_arr${i}`,
                 catalogId: src.catalogId, kind: src.kind,
@@ -1472,7 +1712,6 @@ export default function BoothPlannerV2() {
             }
             threeRef.current.addToGroup(src.uid, groupId, origin.x, origin.z, angle);
             threeRef.current.commitLineItems(newItems);
-            // seleccionar el grupo completo (original + nuevas copias)
             const allGroupUids = [src.uid, ...newItems.map((it) => it.uid)];
             setTimeout(() => threeRef.current.setSelectedGroup(allGroupUids), 0);
           }
@@ -1492,7 +1731,32 @@ export default function BoothPlannerV2() {
     };
     dom.addEventListener("pointerdown", onDownSelect);
     const onDblClick = (e) => {
-      if (pendingLineDefRef.current) return; // no aplica en modo línea
+      // doble click termina column tool
+      if (columnToolActiveRef.current) {
+        hideColumnGhost();
+        setColumnToolActive(false);
+        return;
+      }
+      // doble click termina wall tool
+      if (wallToolActiveRef.current) {
+        wallStateRef.current = { active: false, start: null, end: null };
+        threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
+        wallSessionIdRef.current = null;
+        setWallToolActive(false);
+        return;
+      }
+      // doble click termina measure tool
+      if (measureToolActiveRef.current) {
+        measureStateRef.current = { active: false, start: null, measures: [] };
+        const { measurePreviewLine, measurePreviewLabel, measureStartDot, measureGroup } = threeRef.current;
+        measurePreviewLine.visible = false;
+        measurePreviewLabel.visible = false;
+        measureStartDot.visible = false;
+        while (measureGroup.children.length) measureGroup.remove(measureGroup.children[0]);
+        setMeasureToolActive(false);
+        return;
+      }
+      if (pendingLineDefRef.current) return;
       const rect = dom.getBoundingClientRect();
       pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1501,7 +1765,6 @@ export default function BoothPlannerV2() {
       if (hits.length) {
         let obj = hits[0].object;
         while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
-        // doble click: selecciona SOLO esa pieza, aunque sea parte de un grupo
         threeRef.current.setSelectedGroup([obj.userData.uid]);
       }
     };
@@ -1794,19 +2057,50 @@ export default function BoothPlannerV2() {
     if (selectedWallUid) {
       const wall = walls.find((w) => w.uid === selectedWallUid);
       if (wall) {
-        const makeWallHandle = (x, z, endpoint) => {
-          const geo = new THREE.SphereGeometry(0.12, 16, 16);
-          const mat = new THREE.MeshBasicMaterial({ color: 0xff6a00, depthTest: false });
-          const sphere = new THREE.Mesh(geo, mat);
-          sphere.position.set(x, 0.15, z);
-          sphere.renderOrder = 999;
-          sphere.userData.isWallHandle = true;
-          sphere.userData.wallUid = selectedWallUid;
-          sphere.userData.endpoint = endpoint;
-          return sphere;
-        };
-        handleGroup.add(makeWallHandle(wall.x1, wall.z1, 'start'));
-        handleGroup.add(makeWallHandle(wall.x2, wall.z2, 'end'));
+        if (wall.type === "column") {
+          // 4 side handles for scaling
+          const r = wall.shape === "circular" ? wall.radius : wall.width / 2;
+          const d = wall.shape === "circular" ? wall.radius : wall.depth / 2;
+          const makeColHandle = (x, z, axis, dir) => {
+            const geo = new THREE.SphereGeometry(0.1, 16, 16);
+            const mat = new THREE.MeshBasicMaterial({ color: 0xff6a00, depthTest: false });
+            const sphere = new THREE.Mesh(geo, mat);
+            sphere.position.set(wall.x + x, wall.height / 2, wall.z + z);
+            sphere.renderOrder = 999;
+            sphere.userData.isWallHandle = true;
+            sphere.userData.wallUid = selectedWallUid;
+            sphere.userData.isColumnHandle = true;
+            sphere.userData.axis = axis;
+            sphere.userData.dir = dir;
+            return sphere;
+          };
+          handleGroup.add(makeColHandle(r + 0.12, 0, 'x', 1));   // right
+          handleGroup.add(makeColHandle(-r - 0.12, 0, 'x', -1)); // left
+          handleGroup.add(makeColHandle(0, d + 0.12, 'z', 1));   // front
+          handleGroup.add(makeColHandle(0, -d - 0.12, 'z', -1)); // back
+          // move handle — center top
+          const moveSphere = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 16), new THREE.MeshBasicMaterial({ color: 0x00e5ff, depthTest: false }));
+          moveSphere.position.set(wall.x, wall.height + 0.2, wall.z);
+          moveSphere.renderOrder = 999;
+          moveSphere.userData.isWallHandle = true;
+          moveSphere.userData.wallUid = selectedWallUid;
+          moveSphere.userData.isColumnMove = true;
+          handleGroup.add(moveSphere);
+        } else {
+          const makeWallHandle = (x, z, endpoint) => {
+            const geo = new THREE.SphereGeometry(0.12, 16, 16);
+            const mat = new THREE.MeshBasicMaterial({ color: 0xff6a00, depthTest: false });
+            const sphere = new THREE.Mesh(geo, mat);
+            sphere.position.set(x, 0.15, z);
+            sphere.renderOrder = 999;
+            sphere.userData.isWallHandle = true;
+            sphere.userData.wallUid = selectedWallUid;
+            sphere.userData.endpoint = endpoint;
+            return sphere;
+          };
+          handleGroup.add(makeWallHandle(wall.x1, wall.z1, 'start'));
+          handleGroup.add(makeWallHandle(wall.x2, wall.z2, 'end'));
+        }
       }
     }
 
@@ -1861,19 +2155,29 @@ export default function BoothPlannerV2() {
       if (mesh) wallGroup.remove(mesh);
       mesh = buildWallMesh(wall);
       mesh.userData.wallUid = wall.uid;
-      // highlight selected wall
-      if (wall.uid === selectedWallUid) {
+      // highlight selected wall or its group
+      const selectedWall = walls.find((w) => w.uid === selectedWallUid);
+      const isInSelectedGroup = selectedWall?.groupId && wall.groupId === selectedWall.groupId;
+      if (wall.uid === selectedWallUid || isInSelectedGroup) {
         mesh.traverse((c) => {
-          if (c.isMesh) { c.material = c.material.clone(); c.material.emissive = new THREE.Color(0xff6a00); c.material.emissiveIntensity = 0.3; }
+          if (c.isMesh) { c.material = c.material.clone(); c.material.emissive = new THREE.Color(0xff6a00); c.material.emissiveIntensity = isInSelectedGroup && wall.uid !== selectedWallUid ? 0.15 : 0.3; }
         });
-        const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
-        const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
-        const outlineGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(len * 1.05, wall.height * 1.05, wall.thickness * 1.5));
-        const outlineLine = new THREE.LineSegments(outlineGeo, new THREE.LineBasicMaterial({ color: 0xff6a00, depthTest: false }));
-        outlineLine.position.y = wall.height / 2;
-        outlineLine.renderOrder = 999;
-        outlineLine.raycast = () => {};
-        mesh.add(outlineLine);
+        if (wall.type === "column") {
+          const r = wall.shape === "circular" ? wall.radius : Math.max(wall.width, wall.depth) / 2;
+          const outlineGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(r * 2.2, wall.height * 1.05, r * 2.2));
+          const outlineLine = new THREE.LineSegments(outlineGeo, new THREE.LineBasicMaterial({ color: 0xff6a00, depthTest: false }));
+          outlineLine.position.y = wall.height / 2;
+          outlineLine.renderOrder = 999; outlineLine.raycast = () => {};
+          mesh.add(outlineLine);
+        } else {
+          const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
+          const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
+          const outlineGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(len * 1.05, wall.height * 1.05, wall.thickness * 1.5));
+          const outlineLine = new THREE.LineSegments(outlineGeo, new THREE.LineBasicMaterial({ color: 0xff6a00, depthTest: false }));
+          outlineLine.position.y = wall.height / 2;
+          outlineLine.renderOrder = 999; outlineLine.raycast = () => {};
+          mesh.add(outlineLine);
+        }
       }
       wallGroup.add(mesh);
     });
@@ -1886,14 +2190,73 @@ export default function BoothPlannerV2() {
     itemGroup.children.forEach((container) => {
       const it = items.find((i) => i.uid === container.userData.uid);
       if (!it) return;
-      // categoria oculta o catalogId oculto individualmente
       const catalogHidden = hiddenCatalogIds.has(it.catalogId);
+      const isLocked = (it.kind === "model" && layerLock.models) ||
+                       (it.kind === "primitive" && layerLock.primitives) ||
+                       (it.kind === "prop" && layerLock.props);
       if (it.kind === "model") container.visible = layerVisibility.models && !catalogHidden;
       else if (it.kind === "primitive") container.visible = layerVisibility.primitives && !catalogHidden;
       else if (it.kind === "prop") container.visible = layerVisibility.props && !catalogHidden;
+      // lock visual: opacidad 50% + tinte amarillo
+      container.traverse((child) => {
+        if (!child.isMesh || !child.material) return;
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        mats.forEach((mat) => {
+          if (isLocked) {
+            mat.transparent = true;
+            mat.opacity = 0.5;
+            mat._lockedColorSaved = mat._lockedColorSaved || mat.color.clone();
+            mat.color.lerp(new THREE.Color(0xf59e0b), 0.3);
+          } else {
+            mat.opacity = 1;
+            mat.transparent = false;
+            if (mat._lockedColorSaved) {
+              mat.color.copy(mat._lockedColorSaved);
+              delete mat._lockedColorSaved;
+            }
+          }
+        });
+      });
     });
-    wallGroup.children.forEach((mesh) => { mesh.visible = layerVisibility.walls; });
-  }, [layerVisibility, hiddenCatalogIds, items]);
+    wallGroup.children.forEach((mesh) => {
+      mesh.visible = layerVisibility.walls;
+      mesh.traverse((child) => {
+        if (!child.isMesh || !child.material) return;
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        mats.forEach((mat) => {
+          if (layerLock.walls) {
+            mat.transparent = true;
+            mat.opacity = 0.5;
+            mat._lockedColorSaved = mat._lockedColorSaved || mat.color.clone();
+            mat.color.lerp(new THREE.Color(0xf59e0b), 0.3);
+          } else {
+            mat.opacity = 1;
+            mat.transparent = false;
+            if (mat._lockedColorSaved) {
+              mat.color.copy(mat._lockedColorSaved);
+              delete mat._lockedColorSaved;
+            }
+          }
+        });
+      });
+    });
+    // deselect walls/columns when their layer is hidden
+    if (!layerVisibility.walls && selectedWallUid) {
+      setSelectedWallUid(null);
+    }
+    // deselect items when their layer is hidden
+    if (selectedUids.length > 0) {
+      const anyHidden = selectedUids.some((uid) => {
+        const it = items.find((i) => i.uid === uid);
+        if (!it) return false;
+        if (it.kind === "model" && (!layerVisibility.models || hiddenCatalogIds.has(it.catalogId))) return true;
+        if (it.kind === "primitive" && !layerVisibility.primitives) return true;
+        if (it.kind === "prop" && !layerVisibility.props) return true;
+        return false;
+      });
+      if (anyHidden) setSelectedUids([]);
+    }
+  }, [layerVisibility, layerLock, hiddenCatalogIds, items, selectedWallUid]);
 
   // ===================== Sync items -> meshes (GLB real con caché + placeholder mientras carga) =====================
   const loadedUidsRef = useRef(new Set()); // evita relanzar la carga si ya se está cargando ese uid
@@ -2303,6 +2666,7 @@ export default function BoothPlannerV2() {
         if (wallToolActive) {
           wallStateRef.current = { active: false, start: null, end: null };
           threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
+          wallSessionIdRef.current = null;
           setWallToolActive(false);
         }
         if (measureToolActiveRef.current) {
@@ -2313,6 +2677,10 @@ export default function BoothPlannerV2() {
           measureStartDot.visible = false;
           while (measureGroup.children.length) measureGroup.remove(measureGroup.children[0]);
           setMeasureToolActive(false);
+        }
+        if (columnToolActiveRef.current) {
+          hideColumnGhost();
+          setColumnToolActive(false);
         }
         if (arrayHandleActiveRef.current) {
           arrayHandleActiveRef.current = false;
@@ -2449,6 +2817,35 @@ export default function BoothPlannerV2() {
     items.forEach((it) => { m[it.catalogId] = (m[it.catalogId] || 0) + 1; });
     return m;
   }, [items]);
+
+  const sceneListData = React.useMemo(() => {
+    const categoryMap = {};
+    Object.entries(itemCounts).filter(([, c]) => c > 0).forEach(([catalogId, count]) => {
+      const it = items.find((i) => i.catalogId === catalogId);
+      const kind = it?.kind || "model";
+      const def = findDef(kind, catalogId);
+      if (!def) return;
+      const cat = def.category || (kind === "primitive" ? "Primitives" : kind === "prop" ? "Props" : "Models");
+      if (!categoryMap[cat]) categoryMap[cat] = [];
+      const accMap = {};
+      items.filter((i) => i.catalogId === catalogId).forEach((i) => {
+        if (!i.sockets) return;
+        Object.entries(i.sockets).forEach(([sName, cfg]) => {
+          if (!cfg) return;
+          const isOn = typeof cfg === 'object' ? cfg.enabled : !!cfg;
+          if (!isOn) return;
+          const label = sName.includes('lamp') ? 'Lamp' : sName.includes('shelf') ? 'Shelves' : sName.replace('socket_', '');
+          const n = typeof cfg === 'object' && cfg.count ? cfg.count : 1;
+          accMap[label] = (accMap[label] || 0) + n;
+        });
+      });
+      categoryMap[cat].push({ catalogId, name: def.name, count, accessories: accMap });
+    });
+    if (walls.length > 0) {
+      categoryMap["Walls & Structure"] = [{ catalogId: "_walls", name: "Walls", count: walls.length, accessories: {} }];
+    }
+    return categoryMap;
+  }, [items, walls, itemCounts]);
 
   // ===================== Selected item ops =====================
   const selectedItem = items.find((i) => i.uid === selectedUid);
@@ -2756,7 +3153,7 @@ export default function BoothPlannerV2() {
       if (!window.confirm("Start a new project? All unsaved changes will be lost.")) return;
     }
     setItems([]); setWalls([]); setCameras([]);
-    setFloorW(10); setFloorD(8); setFloorColor("#e9e9e9");
+    setFloorW(10); setFloorD(8); setFloorColor("#212121");
     setFloorPlan(null);
     setWallConfig({ height: 2.4, glassRatio: 0, thickness: 0.1, color: "#cccccc" });
     setProjectName("Untitled Project");
@@ -3094,14 +3491,14 @@ export default function BoothPlannerV2() {
           const catItems = catalog.filter((c) => (c.category || "Models") === cat && c.category !== "Props");
           const catCount = items.filter((it) => it.kind === "model" && catItems.some((c) => c.id === it.catalogId)).length;
           return (
-            <Section key={cat} title={cat} defaultOpen={false} badge={catCount > 0 ? catCount : null} visible={layerVisibility.models} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, models: !v.models }))}>
+            <Section key={cat} title={cat} defaultOpen={false} badge={catCount > 0 ? catCount : null} visible={layerVisibility.models} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, models: !v.models }))} locked={layerLock.models} onLockToggle={() => setLayerLock((v) => ({ ...v, models: !v.models }))}>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {catItems.map((c) => {
                   const thumb = thumbnails[c.id];
                   const count = itemCounts[c.id] || 0;
                   const isHidden = hiddenCatalogIds.has(c.id);
                   return (
-                    <div key={c.id} style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", opacity: isHidden ? 0.45 : libraryReady ? 1 : 0.5, pointerEvents: libraryReady ? "auto" : "none" }}>
+                    <div key={c.id} style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", opacity: isHidden ? 0.45 : layerLock.models ? 0.35 : libraryReady ? 1 : 0.5, pointerEvents: libraryReady && !layerLock.models ? "auto" : "none" }}>
                       <div style={{ display: "flex", alignItems: "stretch", gap: 0, position: "relative" }}>
                         {/* Eye toggle — esquina superior derecha */}
                         <button onClick={(e) => { e.stopPropagation(); toggleCatalogVisibility(c.id); }}
@@ -3148,7 +3545,7 @@ export default function BoothPlannerV2() {
         })}
 
         {/* Primitives */}
-        <Section title="Primitives" defaultOpen={false} badge={items.filter((it) => it.kind === "primitive").length || null} visible={layerVisibility.primitives} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, primitives: !v.primitives }))}>
+        <Section title="Primitives" defaultOpen={false} badge={items.filter((it) => it.kind === "primitive").length || null} visible={layerVisibility.primitives} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, primitives: !v.primitives }))} locked={layerLock.primitives} onLockToggle={() => setLayerLock((v) => ({ ...v, primitives: !v.primitives }))}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {PRIMITIVES.map((p) => {
               const PRIM_ICONS = {
@@ -3159,8 +3556,8 @@ export default function BoothPlannerV2() {
               };
               const count = itemCounts[p.id] || 0;
               return (
-                <div key={p.id} draggable onDragStart={() => setDragCatalog({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" })}
-                  style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 6, cursor: "grab", position: "relative" }}>
+                <div key={p.id} draggable={!layerLock.primitives} onDragStart={() => !layerLock.primitives && setDragCatalog({ def: { ...p, color: "#9aa0a6" }, kind: "primitive" })}
+                  style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 8px", display: "flex", flexDirection: "column", alignItems: "center", gap: 6, cursor: layerLock.primitives ? "not-allowed" : "grab", position: "relative", opacity: layerLock.primitives ? 0.35 : 1, pointerEvents: layerLock.primitives ? "none" : "auto" }}>
                   {count > 0 && <span style={{ position: "absolute", top: 6, right: 6, background: "#5b4bff", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 5px" }}>{count}</span>}
                   {PRIM_ICONS[p.kind] || PRIM_ICONS.box}
                   <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>{p.name}</span>
@@ -3171,14 +3568,14 @@ export default function BoothPlannerV2() {
         </Section>
 
         {/* Props & Accessories */}
-        <Section title="Props & Accessories" defaultOpen={false} badge={items.filter((it) => it.kind === "prop").length || null} visible={layerVisibility.props} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, props: !v.props }))}>
+        <Section title="Props & Accessories" defaultOpen={false} badge={items.filter((it) => it.kind === "prop").length || null} visible={layerVisibility.props} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, props: !v.props }))} locked={layerLock.props} onLockToggle={() => setLayerLock((v) => ({ ...v, props: !v.props }))}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
             {[...PROPS, ...catalog.filter((c) => c.category === "Props")].map((p) => {
               const count = itemCounts[p.id] || 0;
               const thumb = thumbnails[p.id];
               return (
-                <div key={p.id} draggable onDragStart={() => setDragCatalog({ def: p, kind: "prop" })}
-                  style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", cursor: "grab", position: "relative" }}>
+                <div key={p.id} draggable={!layerLock.props} onDragStart={() => !layerLock.props && setDragCatalog({ def: p, kind: "prop" })}
+                  style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden", cursor: layerLock.props ? "not-allowed" : "grab", position: "relative", opacity: layerLock.props ? 0.35 : 1, pointerEvents: layerLock.props ? "none" : "auto" }}>
                   {count > 0 && <span style={{ position: "absolute", top: 4, right: 4, background: "#5b4bff", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 5px", zIndex: 1 }}>{count}</span>}
                   <div style={{ height: 56, background: thumb ? "transparent" : (p.color || "#1e2035"), display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {thumb
@@ -3208,18 +3605,28 @@ export default function BoothPlannerV2() {
         )}
 
         {/* Walls & Structure */}
-        <Section title="Walls & Structure" defaultOpen={false} badge={walls.length || null} visible={layerVisibility.walls} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, walls: !v.walls }))}>
+        <Section title="Walls & Structure" defaultOpen={false} badge={walls.length || null} visible={layerVisibility.walls} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, walls: !v.walls }))} locked={layerLock.walls} onLockToggle={() => setLayerLock((v) => ({ ...v, walls: !v.walls }))}>
+          {/* Draw Wall button */}
           <button onClick={() => {
+            if (layerLock.walls) return;
+            setColumnToolActive(false);
             setWallToolActive((v) => {
-              if (v) { wallStateRef.current = { active: false, start: null, end: null }; threeRef.current.clearWallGhost && threeRef.current.clearWallGhost(); }
+              if (v) {
+                wallStateRef.current = { active: false, start: null, end: null };
+                threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
+                wallSessionIdRef.current = null;
+              } else {
+                wallSessionIdRef.current = `wallgroup_${Date.now()}`;
+              }
               return !v;
             });
           }} style={{
             width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             background: wallToolActive ? "linear-gradient(135deg, #5b4bff, #7c6dff)" : "#13162a",
             border: wallToolActive ? "none" : "1px solid #1e2035",
-            borderRadius: 10, color: wallToolActive ? "#fff" : "#94a3b8",
-            padding: "11px", fontSize: 13, cursor: "pointer", fontWeight: 600, marginBottom: 12,
+            borderRadius: 10, color: wallToolActive ? "#fff" : layerLock.walls ? "#334155" : "#94a3b8",
+            padding: "11px", fontSize: 13, cursor: layerLock.walls ? "not-allowed" : "pointer", fontWeight: 600, marginBottom: 8,
+            opacity: layerLock.walls ? 0.4 : 1,
           }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
             {wallToolActive ? "Stop Drawing" : "Draw Wall"}
@@ -3245,7 +3652,7 @@ export default function BoothPlannerV2() {
           <input type="range" min="0" max="1" step="0.05" value={wallConfig.glassRatio}
             onChange={(e) => setWallConfig((c) => ({ ...c, glassRatio: parseFloat(e.target.value) }))}
             style={{ width: "100%", accentColor: "#5b4bff", marginBottom: 10 }} />
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
             <div style={{ flex: 1 }}>
               <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4 }}>Wall Color</label>
               <input type="color" value={wallConfig.color}
@@ -3257,6 +3664,79 @@ export default function BoothPlannerV2() {
                 <button onClick={() => setWalls([])} style={{ background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "7px 12px", fontSize: 11, cursor: "pointer" }}>Clear all</button>
               </div>
             )}
+          </div>
+
+          {/* Divider */}
+          <div style={{ borderTop: "1px solid #1e2035", marginBottom: 12 }} />
+
+          {/* Place Column button */}
+          <button onClick={() => {
+            if (layerLock.walls) return;
+            setWallToolActive(false);
+            wallStateRef.current = { active: false, start: null, end: null };
+            threeRef.current.clearWallGhost && threeRef.current.clearWallGhost();
+            setColumnToolActive((v) => !v);
+          }} style={{
+            width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: columnToolActive ? "linear-gradient(135deg, #c4622d, #e07a4a)" : "#13162a",
+            border: columnToolActive ? "none" : "1px solid #1e2035",
+            borderRadius: 10, color: columnToolActive ? "#fff" : layerLock.walls ? "#334155" : "#94a3b8",
+            padding: "11px", fontSize: 13, cursor: layerLock.walls ? "not-allowed" : "pointer", fontWeight: 600, marginBottom: 8,
+            opacity: layerLock.walls ? 0.4 : 1,
+          }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="8" y="2" width="8" height="20" rx="1"/></svg>
+            {columnToolActive ? "Stop Placing" : "Place Column"}
+          </button>
+          {columnToolActive && (
+            <div style={{ background: "#2d1a0a", border: "1px solid #4a2a10", borderRadius: 8, padding: "8px 10px", marginBottom: 10, fontSize: 10, color: "#fb923c", lineHeight: 1.6 }}>
+              Click to place · Double-click or <b>Esc</b> to finish
+            </div>
+          )}
+
+          {/* Column config */}
+          <div style={{ background: "#0d0f18", border: "1px solid #1e2035", borderRadius: 8, padding: "10px", marginBottom: 12 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Column defaults</div>
+            <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+              {["circular", "square"].map((s) => (
+                <button key={s} onClick={() => setColumnConfig((c) => ({ ...c, shape: s }))}
+                  style={{ flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: "pointer", border: `1px solid ${columnConfig.shape === s ? "#5b4bff" : "#1e2035"}`, background: columnConfig.shape === s ? "#5b4bff" : "#0d0f18", color: columnConfig.shape === s ? "#fff" : "#64748b" }}>
+                  {s.charAt(0).toUpperCase() + s.slice(1)}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              {columnConfig.shape === "circular" ? (
+                <div style={{ gridColumn: "span 2" }}>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 3 }}>Radius ({UNITS[unit].label})</label>
+                  <input type="number" min="0.05" step="0.05" value={fmt(metersTo(columnConfig.radius, unit))}
+                    onChange={(e) => setColumnConfig((c) => ({ ...c, radius: toMeters(parseFloat(e.target.value) || 0.1, unit) }))} style={inputStyle} />
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 3 }}>Width ({UNITS[unit].label})</label>
+                    <input type="number" min="0.05" step="0.05" value={fmt(metersTo(columnConfig.width, unit))}
+                      onChange={(e) => setColumnConfig((c) => ({ ...c, width: toMeters(parseFloat(e.target.value) || 0.1, unit) }))} style={inputStyle} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 3 }}>Depth ({UNITS[unit].label})</label>
+                    <input type="number" min="0.05" step="0.05" value={fmt(metersTo(columnConfig.depth, unit))}
+                      onChange={(e) => setColumnConfig((c) => ({ ...c, depth: toMeters(parseFloat(e.target.value) || 0.1, unit) }))} style={inputStyle} />
+                  </div>
+                </>
+              )}
+              <div style={{ gridColumn: "span 2" }}>
+                <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 3 }}>Height ({UNITS[unit].label})</label>
+                <input type="number" min="0.1" step="0.1" value={fmt(metersTo(columnConfig.height, unit))}
+                  onChange={(e) => setColumnConfig((c) => ({ ...c, height: toMeters(parseFloat(e.target.value) || 0.1, unit) }))} style={inputStyle} />
+              </div>
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 3 }}>Color</label>
+              <input type="color" value={columnConfig.color}
+                onChange={(e) => setColumnConfig((c) => ({ ...c, color: e.target.value }))}
+                style={{ width: "100%", height: 28, border: "1px solid #1e2035", borderRadius: 6, padding: 2, cursor: "pointer", background: "none" }} />
+            </div>
           </div>
         </Section>
 
@@ -3465,12 +3945,130 @@ export default function BoothPlannerV2() {
         </div>
       </div>
 
-      {/* Right panel: selected item properties */}
       {/* Right panel — always visible, empty state when nothing is selected */}
-      <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#0d1117", padding: 16, overflowY: "auto", borderLeft: "1px solid #1e2035" }}>
+      <div style={{ width: 280, minWidth: 280, maxWidth: 280, flexShrink: 0, background: "#0d1117", display: "flex", flexDirection: "column", borderLeft: "1px solid #1e2035" }}>
+        {/* Tabs */}
+        <div style={{ display: "flex", borderBottom: "1px solid #1e2035", flexShrink: 0 }}>
+          {[["properties", "Properties"], ["scene", "Scene List"]].map(([tab, label]) => (
+            <button key={tab} onClick={() => setRightPanelTab(tab)} style={{
+              flex: 1, padding: "10px 0", background: "none", border: "none", cursor: "pointer",
+              fontSize: 11, fontWeight: 600, color: rightPanelTab === tab ? "#e2e8f0" : "#475569",
+              borderBottom: rightPanelTab === tab ? "2px solid #5b4bff" : "2px solid transparent",
+            }}>{label}</button>
+          ))}
+        </div>
+
+        {/* Scene List tab */}
+        {rightPanelTab === 'scene' && (
+          <SceneListPanel
+            sceneListData={sceneListData}
+            items={items}
+            walls={walls}
+            itemCounts={itemCounts}
+            selectedUids={selectedUids}
+            projectName={projectName}
+            unit={unit}
+            UNITS={UNITS}
+            fmt={fmt}
+            metersTo={metersTo}
+            threeRef={threeRef}
+            setRightPanelTab={setRightPanelTab}
+          />
+        )}
+
+        {/* Properties tab */}
+        {rightPanelTab === 'properties' && (
+        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         {selectedWallUid && !selectedItem ? (() => {
           const selWall = walls.find((w) => w.uid === selectedWallUid);
           if (!selWall) return null;
+          if (selWall.type === "column") return (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                <div style={{ width: 3, height: 20, background: "#5b4bff", borderRadius: 2 }} />
+                <h3 style={{ fontSize: 14, fontWeight: 700, margin: 0, color: "#e2e8f0" }}>Column Properties</h3>
+              </div>
+              {/* Shape pills */}
+              <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+                {["circular", "square"].map((s) => (
+                  <button key={s} onClick={() => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, shape: s } : w))}
+                    style={{ flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: "pointer", border: `1px solid ${selWall.shape === s ? "#5b4bff" : "#1e2035"}`, background: selWall.shape === s ? "#5b4bff" : "#0d0f18", color: selWall.shape === s ? "#fff" : "#64748b" }}>
+                    {s.charAt(0).toUpperCase() + s.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                {selWall.shape === "circular" ? (
+                  <div style={{ gridColumn: "span 2" }}>
+                    <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Radius ({UNITS[unit].label})</label>
+                    <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selWall.radius, unit))}
+                      onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, radius: toMeters(parseFloat(e.target.value) || 0.1, unit) } : w))}
+                      style={inputStyle} />
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Width ({UNITS[unit].label})</label>
+                      <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selWall.width, unit))}
+                        onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, width: toMeters(parseFloat(e.target.value) || 0.1, unit) } : w))}
+                        style={inputStyle} />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Depth ({UNITS[unit].label})</label>
+                      <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selWall.depth, unit))}
+                        onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, depth: toMeters(parseFloat(e.target.value) || 0.1, unit) } : w))}
+                        style={inputStyle} />
+                    </div>
+                  </>
+                )}
+                <div style={{ gridColumn: "span 2" }}>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Height ({UNITS[unit].label})</label>
+                  <input type="number" min="0.1" step="0.1" value={fmt(metersTo(selWall.height, unit))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, height: toMeters(parseFloat(e.target.value) || 0.1, unit) } : w))}
+                    style={inputStyle} />
+                </div>
+              </div>
+              {/* Position */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>X ({UNITS[unit].label})</label>
+                  <input type="number" step="0.1" value={fmt(metersTo(selWall.x, unit))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, x: toMeters(parseFloat(e.target.value) || 0, unit) } : w))}
+                    style={inputStyle} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Z ({UNITS[unit].label})</label>
+                  <input type="number" step="0.1" value={fmt(metersTo(selWall.z, unit))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, z: toMeters(parseFloat(e.target.value) || 0, unit) } : w))}
+                    style={inputStyle} />
+                </div>
+              </div>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Color</label>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+                <input type="color" value={selWall.color}
+                  onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, color: e.target.value } : w))}
+                  style={{ width: 36, height: 36, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
+                <div style={{ flex: 1, height: 36, background: selWall.color, borderRadius: 8, border: "1px solid #1e2035" }} />
+              </div>
+              {/* Rotate + Duplicate + Delete */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button onClick={() => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, rotY: ((w.rotY || 0) + Math.PI / 2) } : w))}
+                  style={{ flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#94a3b8", padding: "8px", fontSize: 11, cursor: "pointer", fontWeight: 500, minWidth: 60 }}>
+                  ↻ 90°
+                </button>
+                <button onClick={() => {
+                  const newCol = { ...selWall, uid: `col_${Date.now()}`, x: selWall.x + (selWall.radius || selWall.width || 0.3) * 2 + 0.1 };
+                  setWalls((prev) => [...prev, newCol]);
+                }} style={{ flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#94a3b8", padding: "8px", fontSize: 11, cursor: "pointer", fontWeight: 500, minWidth: 60 }}>
+                  Duplicate
+                </button>
+                <button onClick={() => { setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid)); setSelectedWallUid(null); }}
+                  style={{ flex: 1, background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "8px", fontSize: 11, cursor: "pointer", fontWeight: 500, minWidth: 60 }}>
+                  Delete
+                </button>
+              </div>
+            </>
+          );
           return (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
@@ -3502,6 +4100,13 @@ export default function BoothPlannerV2() {
                   style={{ width: 36, height: 36, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
                 <div style={{ flex: 1, height: 36, background: selWall.color, borderRadius: 8, border: "1px solid #1e2035" }} />
               </div>
+              {selWall.groupId && (
+                <button onClick={() => {
+                  setWalls((prev) => prev.map((w) => w.groupId === selWall.groupId ? { ...w, groupId: null } : w));
+                }} style={{ width: "100%", background: "#13162a", border: "1px solid #1e2035", borderRadius: 8, color: "#94a3b8", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 500, marginBottom: 8 }}>
+                  Ungroup walls
+                </button>
+              )}
               <button
                 onClick={() => { setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid)); setSelectedWallUid(null); }}
                 style={{ width: "100%", background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
@@ -3556,6 +4161,89 @@ export default function BoothPlannerV2() {
                     ← → rotates around pivot · Shift+← → rotates each in place
                   </div>
                 )}
+                {allSameGroup && selItems[0].pivotX != null && (() => {
+                  // calcular espaciado actual
+                  const sorted = [...selItems].sort((a, b) => {
+                    const px = selItems[0].pivotX; const pz = selItems[0].pivotZ ?? 0;
+                    return Math.hypot(a.x - px, a.z - pz) - Math.hypot(b.x - px, b.z - pz);
+                  });
+                  const currentSpacing = sorted.length >= 2
+                    ? Math.hypot(sorted[1].x - sorted[0].x, sorted[1].z - sorted[0].z)
+                    : (findDef(selItems[0].kind, selItems[0].catalogId)?.w || 1);
+                  const def = findDef(selItems[0].kind, selItems[0].catalogId);
+                  const objWidth = def?.w || 1;
+                  const centerToCenter = sorted.length >= 2
+                    ? Math.hypot(sorted[1].x - sorted[0].x, sorted[1].z - sorted[0].z)
+                    : objWidth;
+                  const currentGap = centerToCenter - objWidth; // gap entre bordes
+                  const minSpacing = 0; // mínimo gap = 0 (continuo)
+                  const dir = sorted.length >= 2
+                    ? new THREE.Vector3(sorted[1].x - sorted[0].x, 0, sorted[1].z - sorted[0].z).normalize()
+                    : new THREE.Vector3(Math.sin(selItems[0].rotY + Math.PI / 2), 0, Math.cos(selItems[0].rotY + Math.PI / 2));
+                  return (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 9, color: "#475569", marginBottom: 3 }}>Count</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <button onClick={() => {
+                              if (sorted.length <= 1) return;
+                              const last = sorted[sorted.length - 1];
+                              const remaining = sorted.slice(0, -1);
+                              if (remaining.length === 1) {
+                                // queda solo 1 — desagrupar
+                                setItems((prev) => prev
+                                  .filter((it) => it.uid !== last.uid)
+                                  .map((it) => it.uid === remaining[0].uid ? { ...it, groupId: null } : it));
+                                setTimeout(() => threeRef.current.setSelectedGroup([remaining[0].uid]), 0);
+                              } else {
+                                const newUids = selectedUids.filter((uid) => uid !== last.uid);
+                                setItems((prev) => prev.filter((it) => it.uid !== last.uid));
+                                setTimeout(() => threeRef.current.setSelectedGroup(newUids), 0);
+                              }
+                            }} style={{ width: 24, height: 24, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 5, color: "#e2e8f0", fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>−</button>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", minWidth: 24, textAlign: "center" }}>{sorted.length}</span>
+                            <button onClick={() => {
+                              const last = sorted[sorted.length - 1];
+                              const newPos = new THREE.Vector3(last.x + dir.x * centerToCenter, 0, last.z + dir.z * centerToCenter);
+                              const newItem = {
+                                uid: `${last.catalogId}_${Date.now()}_add`,
+                                catalogId: last.catalogId, kind: last.kind,
+                                x: newPos.x, z: newPos.z, rotY: last.rotY,
+                                color: varyColor(last.color, sorted.length),
+                                sockets: { ...last.sockets }, groupId: last.groupId,
+                                pivotX: sorted[0].x, pivotZ: sorted[0].z,
+                              };
+                              threeRef.current.commitLineItems([newItem]);
+                              setTimeout(() => threeRef.current.setSelectedGroup([...selectedUids, newItem.uid]), 0);
+                            }} style={{ width: 24, height: 24, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 5, color: "#e2e8f0", fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
+                          </div>
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 9, color: "#475569", marginBottom: 3 }}>Spacing ({UNITS[unit].label})</div>
+                          <input type="number" min="0" step="0.1"
+                            value={fmt(metersTo(Math.max(0, currentGap), unit))}
+                            onChange={(e) => {
+                              const newGap = Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit));
+                              const newCenterToCenter = objWidth + newGap;
+                              setItems((prev) => prev.map((it) => {
+                                if (!selectedUids.includes(it.uid)) return it;
+                                const idx = sorted.findIndex((s) => s.uid === it.uid);
+                                if (idx < 0) return it;
+                                const newPos = new THREE.Vector3(
+                                  sorted[0].x + dir.x * newCenterToCenter * idx,
+                                  0,
+                                  sorted[0].z + dir.z * newCenterToCenter * idx
+                                );
+                                return { ...it, x: newPos.x, z: newPos.z };
+                              }));
+                            }}
+                            style={{ ...inputStyle, width: "100%" }} />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div style={{ display: "flex", gap: 6 }}>
                   {!allSameGroup && (
                     <button onClick={() => {
@@ -3821,7 +4509,9 @@ export default function BoothPlannerV2() {
             <span style={{ fontSize: 11, color: "#999", textAlign: "center" }}>Select an object<br/>to edit properties</span>
           </div>
         )}
-      </div>
+        </div>
+        )}
+      </div>{/* end right panel */}
       </div>{/* end main content */}
 
       {/* ===== BOTTOM BAR — Scene summary ===== */}
@@ -3865,11 +4555,44 @@ export default function BoothPlannerV2() {
           </div>
         )}
 
+        {/* Accessory chips */}
+        {(() => {
+          // contar accesorios activos por tipo
+          const accCounts = {};
+          items.forEach((it) => {
+            if (!it.sockets) return;
+            Object.entries(it.sockets).forEach(([sName, cfg]) => {
+              if (!cfg) return;
+              const isOn = typeof cfg === 'object' ? cfg.enabled : !!cfg;
+              if (!isOn) return;
+              // nombre legible del socket
+              const label = sName.includes('lamp') ? 'Lamp' : sName.includes('shelf') ? 'Shelves' : sName.replace('socket_', '');
+              const count = typeof cfg === 'object' && cfg.count ? cfg.count : 1;
+              accCounts[label] = (accCounts[label] || 0) + count;
+            });
+          });
+          return Object.entries(accCounts).map(([label, count]) => {
+            const isLamp = label === 'Lamp';
+            const color = isLamp ? "#f59e0b" : "#818cf8";
+            const icon = isLamp
+              ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.3 6H8.3C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/></svg>
+              : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2"><rect x="2" y="3" width="20" height="4" rx="1"/><rect x="2" y="10" width="20" height="4" rx="1"/><rect x="2" y="17" width="20" height="4" rx="1"/></svg>;
+            return (
+              <div key={label} style={{ display: "flex", alignItems: "center", gap: 5, background: "#13162a", border: `1px solid ${color}33`, borderRadius: 20, padding: "4px 10px 4px 8px", flexShrink: 0 }}>
+                {icon}
+                <span style={{ fontSize: 11, color: "#e2e8f0", fontWeight: 500 }}>{label}</span>
+                <span style={{ background: color, color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, padding: "1px 7px" }}>{count}</span>
+              </div>
+            );
+          });
+        })()}
+
         {/* Empty state */}
         {Object.values(itemCounts).every((v) => !v) && walls.length === 0 && (
           <span style={{ fontSize: 11, color: "#1e2a3a", fontStyle: "italic" }}>No objects placed yet</span>
         )}
-      </div>
+
+      </div>{/* end bottom bar */}
 
     </div>{/* end root */}
     </>
@@ -4221,9 +4944,192 @@ function ConfirmDimensionsStep({ modal, onConfirm, unit, UNITS, fmt, metersTo, t
   );
 }
 
-function Section({ title, children, badge, defaultOpen = true, visible, onVisibilityToggle }) {
+function SceneListPanel({ sceneListData, items, walls, itemCounts, selectedUids, projectName, unit, UNITS, fmt, metersTo, threeRef, setRightPanelTab }) {
+  const [copiedText, setCopiedText] = React.useState(false);
+  const [expandedModels, setExpandedModels] = React.useState({});
+
+  const allCats = React.useMemo(() => {
+    const cats = Object.keys(sceneListData).filter((c) => c !== "Walls & Structure");
+    const hasAccs = Object.values(sceneListData).flat().some(({ accessories }) => Object.keys(accessories).length > 0);
+    if (hasAccs) cats.push("Accessories");
+    cats.push("Walls & Structure");
+    return cats;
+  }, [sceneListData]);
+
+  const [activeFilters, setActiveFilters] = React.useState(() => {
+    const f = {};
+    Object.keys(sceneListData).forEach((c) => { f[c] = c !== "Walls & Structure"; });
+    f["Accessories"] = true;
+    f["Walls & Structure"] = false;
+    return f;
+  });
+
+  React.useEffect(() => {
+    setActiveFilters((prev) => {
+      const next = { ...prev };
+      allCats.forEach((c) => { if (!(c in next)) next[c] = c !== "Walls & Structure"; });
+      return next;
+    });
+  }, [allCats]);
+
+  const toggleModel = (catalogId) => setExpandedModels((prev) => ({ ...prev, [catalogId]: !prev[catalogId] }));
+  const toggleFilter = (cat) => setActiveFilters((prev) => ({ ...prev, [cat]: !prev[cat] }));
+
+  const allAccs = React.useMemo(() => {
+    const acc = {};
+    Object.values(sceneListData).flat().forEach(({ accessories }) => {
+      Object.entries(accessories).forEach(([a, n]) => { acc[a] = (acc[a] || 0) + n; });
+    });
+    return acc;
+  }, [sceneListData]);
+
+  const copyText = () => {
+    let text = `Scene List — ${projectName}\n${"─".repeat(36)}\n`;
+    Object.entries(sceneListData).forEach(([cat, rows]) => {
+      if (cat === "Walls & Structure" || !activeFilters[cat]) return;
+      text += `\n${cat}\n`;
+      rows.forEach(({ name, count }) => { text += `  ${name} × ${count}\n`; });
+    });
+    if (activeFilters["Accessories"] && Object.keys(allAccs).length) {
+      text += `\nAccessories\n`;
+      Object.entries(allAccs).forEach(([a, n]) => { text += `  ${a} × ${n}\n`; });
+    }
+    if (activeFilters["Walls & Structure"] && walls.length) text += `\nWalls × ${walls.length}\n`;
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
+    setCopiedText(true); setTimeout(() => setCopiedText(false), 2000);
+  };
+
+  const downloadCSV = () => {
+    let csv = "Category,Model,Qty\n";
+    Object.entries(sceneListData).forEach(([cat, rows]) => {
+      if (cat === "Walls & Structure" || !activeFilters[cat]) return;
+      rows.forEach(({ name, count }) => { csv += `${cat},${name},${count}\n`; });
+    });
+    if (activeFilters["Accessories"]) Object.entries(allAccs).forEach(([a, n]) => { csv += `Accessories,${a},${n}\n`; });
+    if (activeFilters["Walls & Structure"] && walls.length) csv += `Walls & Structure,Walls,${walls.length}\n`;
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url;
+    a.download = `${projectName.replace(/\s+/g, "_")}_scene.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+      {/* Category filter toggles */}
+      <div style={{ padding: "8px 12px", borderBottom: "1px solid #1e2035", flexShrink: 0 }}>
+        <div style={{ fontSize: 9, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Show in export</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {allCats.map((cat) => (
+            <div key={cat} onClick={() => toggleFilter(cat)} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", padding: "2px 0" }}>
+              <div style={{ width: 28, height: 16, background: activeFilters[cat] ? "#5b4bff" : "#1e2035", border: activeFilters[cat] ? "none" : "1px solid #2a2f4a", borderRadius: 8, position: "relative", flexShrink: 0, transition: "background 0.15s" }}>
+                <div style={{ width: 12, height: 12, background: activeFilters[cat] ? "#fff" : "#475569", borderRadius: "50%", position: "absolute", top: 2, left: activeFilters[cat] ? 14 : 2, transition: "left 0.15s" }} />
+              </div>
+              <span style={{ fontSize: 11, color: activeFilters[cat] ? "#94a3b8" : "#334155" }}>{cat}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {/* Buttons */}
+      <div style={{ display: "flex", gap: 6, padding: "8px 12px", borderBottom: "1px solid #1e2035", flexShrink: 0 }}>
+        <button onClick={copyText} style={{ flex: 1, background: copiedText ? "#1a3a28" : "#1e2035", border: `1px solid ${copiedText ? "#4ade80" : "#2a2f4a"}`, borderRadius: 6, color: copiedText ? "#4ade80" : "#94a3b8", fontSize: 10, padding: "5px 0", cursor: "pointer", fontWeight: 600, transition: "all 0.2s" }}>
+          {copiedText ? "✓ Copied!" : "Copy text"}
+        </button>
+        <button onClick={downloadCSV} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 6, color: "#94a3b8", fontSize: 10, padding: "5px 0", cursor: "pointer", fontWeight: 600 }}>Download CSV</button>
+      </div>
+      {/* Outliner */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
+        {Object.keys(sceneListData).length === 0 && walls.length === 0 ? (
+          <div style={{ padding: "24px 16px", textAlign: "center", color: "#334155", fontSize: 11 }}>No objects placed yet</div>
+        ) : (
+          <>
+            {Object.entries(sceneListData).filter(([cat]) => cat !== "Walls & Structure").map(([cat, catRows]) => (
+              <div key={cat} style={{ opacity: activeFilters[cat] ? 1 : 0.35 }}>
+                <div style={{ display: "flex", alignItems: "center", padding: "8px 12px 4px", gap: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.06em", flex: 1 }}>{cat}</span>
+                  <span style={{ background: "#1e2035", color: "#64748b", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 6px" }}>{catRows.reduce((s, r) => s + r.count, 0)}</span>
+                </div>
+                {catRows.map(({ catalogId, name, count }) => {
+                  const modelUids = items.filter((it) => it.catalogId === catalogId).map((it) => it.uid);
+                  const allSelected = modelUids.length > 0 && modelUids.every((uid) => selectedUids.includes(uid));
+                  const isExpanded = expandedModels[catalogId];
+                  return (
+                    <div key={catalogId}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px 5px 16px", background: allSelected ? "#13162a" : "transparent", borderLeft: allSelected ? "2px solid #5b4bff" : "2px solid transparent" }}>
+                        <div onClick={() => toggleModel(catalogId)} style={{ flexShrink: 0, width: 16, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2.5" style={{ transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.15s" }}><polyline points="6,9 12,15 18,9"/></svg>
+                        </div>
+                        <div onClick={() => threeRef.current.setSelectedGroup(modelUids)} style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, cursor: "pointer" }}>
+                          <div style={{ width: 7, height: 7, borderRadius: 2, background: "#5b4bff", flexShrink: 0 }} />
+                          <span style={{ fontSize: 12, color: allSelected ? "#e2e8f0" : "#94a3b8", flex: 1, fontWeight: allSelected ? 600 : 400 }}>{name}</span>
+                          <span style={{ background: "#5b4bff", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 6px" }}>{count}</span>
+                        </div>
+                      </div>
+                      {isExpanded && items.filter((it) => it.catalogId === catalogId).map((it, idx) => {
+                        const isSel = selectedUids.includes(it.uid) && selectedUids.length === 1;
+                        return (
+                          <div key={it.uid} onClick={() => threeRef.current.setSelectedGroup([it.uid])}
+                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px 4px 40px", cursor: "pointer", background: isSel ? "#13162a" : "transparent", borderLeft: isSel ? "2px solid #00e5ff" : "2px solid transparent" }}>
+                            <span style={{ fontSize: 10, color: "#334155" }}>#{idx + 1}</span>
+                            <span style={{ fontSize: 11, color: isSel ? "#00e5ff" : "#475569", flex: 1 }}>{name}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            {Object.keys(allAccs).length > 0 && (
+              <div style={{ opacity: activeFilters["Accessories"] ? 1 : 0.35 }}>
+                <div style={{ display: "flex", alignItems: "center", padding: "8px 12px 4px", gap: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.06em", flex: 1 }}>Accessories</span>
+                  <span style={{ background: "#1e2035", color: "#64748b", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 6px" }}>{Object.values(allAccs).reduce((s, v) => s + v, 0)}</span>
+                </div>
+                {Object.entries(allAccs).map(([acc, n]) => (
+                  <div key={acc} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 12px 5px 28px" }}>
+                    <div style={{ width: 7, height: 7, borderRadius: 2, background: acc === "Lamp" ? "#f59e0b" : "#818cf8", flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, color: "#94a3b8", flex: 1 }}>{acc}</span>
+                    <span style={{ background: acc === "Lamp" ? "#f59e0b" : "#818cf8", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 6px" }}>{n}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {walls.length > 0 && (
+              <div style={{ opacity: activeFilters["Walls & Structure"] ? 1 : 0.35 }}>
+                <div style={{ display: "flex", alignItems: "center", padding: "8px 12px 4px", gap: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.06em", flex: 1 }}>Walls & Structure</span>
+                  <span style={{ background: "#1e2035", color: "#64748b", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 6px" }}>{walls.length}</span>
+                </div>
+                {walls.map((w, idx) => (
+                  <div key={w.uid} onClick={() => { threeRef.current.setSelectedWall && threeRef.current.setSelectedWall(w.uid); threeRef.current.setSelected && threeRef.current.setSelected(null); setRightPanelTab("properties"); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 12px 5px 28px", cursor: "pointer" }}
+                    onMouseEnter={e => e.currentTarget.style.background = "#0d0f18"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                    <div style={{ width: 7, height: 7, borderRadius: 2, background: "#c4622d", flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, color: "#94a3b8", flex: 1 }}>Wall #{idx + 1}</span>
+                    <span style={{ fontSize: 10, color: "#475569" }}>{fmt(metersTo(Math.hypot(w.x2 - w.x1, w.z2 - w.z1), unit))}{UNITS[unit].label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ borderTop: "1px solid #1e2035", margin: "8px 12px 0", padding: "8px 0", display: "flex", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 10, color: "#475569" }}>Total objects</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0" }}>{Object.values(itemCounts).reduce((s, v) => s + v, 0) + walls.length}</span>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function Section({ title, children, badge, defaultOpen = true, visible, onVisibilityToggle, locked, onLockToggle }) {
   const [open, setOpen] = React.useState(defaultOpen);
   const hasVisibility = visible !== undefined;
+  const hasLock = locked !== undefined;
   return (
     <div style={{ borderBottom: "1px solid #1e2035" }}>
       <div style={{ display: "flex", alignItems: "center" }}>
@@ -4242,6 +5148,16 @@ function Section({ title, children, badge, defaultOpen = true, visible, onVisibi
             <polyline points="6,9 12,15 18,9"/>
           </svg>
         </button>
+        {hasLock && (
+          <button onClick={(e) => { e.stopPropagation(); onLockToggle(); }}
+            title={locked ? "Unlock" : "Lock"}
+            style={{ flexShrink: 0, width: 28, height: 28, background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: locked ? "#f59e0b" : "#334155" }}>
+            {locked
+              ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+            }
+          </button>
+        )}
         {hasVisibility && (
           <div onClick={(e) => { e.stopPropagation(); onVisibilityToggle(); }}
             style={{ flexShrink: 0, marginRight: 12, display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
