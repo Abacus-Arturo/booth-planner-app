@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 
+const APP_VERSION = "1.0.0";
+
 // ===================== Units =====================
 const UNITS = {
   m: { label: "m", toMeters: 1 },
@@ -474,6 +476,8 @@ export default function BoothPlannerV2() {
     return () => clearTimeout(t);
   }, [items, walls, pushHistory]);
   const [selectedUids, setSelectedUids] = useState([]); // array de uids
+  const selectedUidsRef = useRef([]);
+  useEffect(() => { selectedUidsRef.current = selectedUids; }, [selectedUids]);
   const [selectedWallUid, setSelectedWallUid] = useState(null);
   const draggingWallHandleRef = useRef(null); // { type, wallUid/groupId/sourceUid, endpoint/role }
   const arrayHandleActiveRef = useRef(false); // true cuando estamos en modo array desde handle
@@ -627,7 +631,8 @@ export default function BoothPlannerV2() {
     let useOrtho = false;
     let activeCam = camera;
     const updateOrthoFrustum = (r) => {
-      const aspect = width / height;
+      const w = mount.clientWidth, h = mount.clientHeight;
+      const aspect = w / h;
       const halfH = r * 0.6;
       orthoCam.left = -halfH * aspect; orthoCam.right = halfH * aspect;
       orthoCam.top = halfH; orthoCam.bottom = -halfH;
@@ -688,7 +693,7 @@ export default function BoothPlannerV2() {
     const setView = (name) => {
       if (name === "free") {
         useOrtho = false; activeCam = camera;
-        camera.aspect = width / height; camera.updateProjectionMatrix();
+        camera.aspect = mount.clientWidth / mount.clientHeight; camera.updateProjectionMatrix();
       } else {
         const a = VIEW_ANGLES[name];
         theta = a.theta; phi = a.phi;
@@ -1205,7 +1210,16 @@ export default function BoothPlannerV2() {
         }
         // preparar offsets para mover el grupo entero junto (si el seleccionado termina siendo un grupo)
         const startPt = groundPoint(e.clientX, e.clientY);
-        const groupUidsForDrag = groupId ? itemsRef.current.filter((it) => it.groupId === groupId).map((it) => it.uid) : [draggingUid];
+        let groupUidsForDrag;
+        if (groupId && !e.shiftKey) {
+          groupUidsForDrag = itemsRef.current.filter((it) => it.groupId === groupId).map((it) => it.uid);
+        } else {
+          // incluir todos los seleccionados actualmente (multiselección manual con Shift)
+          const currentSelected = selectedUidsRef.current;
+          groupUidsForDrag = currentSelected.includes(draggingUid)
+            ? currentSelected
+            : [draggingUid];
+        }
         dragOffsetsRef.current = {};
         groupUidsForDrag.forEach((uid) => {
           const it = itemsRef.current.find((i) => i.uid === uid);
@@ -1533,7 +1547,7 @@ export default function BoothPlannerV2() {
         dragArmed = true;
       }
       const draggedItem = itemsRef.current.find((it) => it.uid === draggingUid);
-      if (draggedItem && draggedItem.kind === "prop") {
+      if (draggedItem && draggedItem.kind === "prop" && Object.keys(dragOffsetsRef.current).length <= 1) {
         const rect = dom.getBoundingClientRect();
         pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1775,8 +1789,6 @@ export default function BoothPlannerV2() {
     const onResize = () => {
       const w = mount.clientWidth, h = mount.clientHeight;
       camera.aspect = w / h; camera.updateProjectionMatrix();
-      orthoCam.left = -10 * (w / h); orthoCam.right = 10 * (w / h);
-      orthoCam.updateProjectionMatrix();
       updateOrthoFrustum(radius);
       renderer.setSize(w, h);
     };
@@ -3249,7 +3261,10 @@ export default function BoothPlannerV2() {
           <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg, #5b4bff 0%, #7c6dff 100%)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             <svg width="17" height="17" viewBox="0 0 16 16" fill="none"><rect x="2" y="6" width="12" height="8" rx="1" fill="white" fillOpacity="0.92"/><path d="M1 6L8 2L15 6" stroke="white" strokeWidth="1.5" strokeLinejoin="round"/><rect x="6" y="9" width="4" height="5" rx="0.5" fill="#5b4bff"/></svg>
           </div>
-          <span style={{ fontSize: 14, fontWeight: 700, color: "#fff", letterSpacing: "-0.01em" }}>Booth Planner</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: "#fff", letterSpacing: "-0.01em" }}>Booth Planner</span>
+            <span style={{ fontSize: 9, color: "#475569", letterSpacing: "0.04em" }}>v{APP_VERSION}</span>
+          </div>
         </div>
 
         {/* Divider */}
@@ -4295,8 +4310,8 @@ export default function BoothPlannerV2() {
                 {[["W", "w", selectedDef.w], ["D", "d", selectedDef.d], ["H", "h", selectedDef.h]].map(([label, key, def]) => (
                   <div key={key} style={{ flex: 1 }}>
                     <div style={{ fontSize: 9, color: "#475569", marginBottom: 3 }}>{label}</div>
-                    <input type="number" min="0.05" step="0.05" value={fmt(metersTo(selectedItem[key] ?? def, unit))}
-                      onChange={(e) => updateSelected({ [key]: Math.max(0.05, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} />
+                    <input type="number" min={fmt(metersTo(0.001, unit))} step={fmt(metersTo(0.01, unit))} value={fmt(metersTo(selectedItem[key] ?? def, unit))}
+                      onChange={(e) => updateSelected({ [key]: Math.max(0.001, toMeters(parseFloat(e.target.value) || 0, unit)) })} style={inputStyle} />
                   </div>
                 ))}
               </div>
