@@ -439,7 +439,7 @@ export default function BoothPlannerV2() {
   useEffect(() => { floorDRef.current = floorD; }, [floorD]);
 
   // Floor appearance
-  const [floorColor, setFloorColor] = useState("#212121");
+  const [floorColor, setFloorColor] = useState("#878787");
 
   // Floor plan image
   const [floorPlan, setFloorPlan] = useState(null); // { dataUrl, realW, realH, opacity, x, z, visible }
@@ -492,7 +492,7 @@ export default function BoothPlannerV2() {
   const [wallToolActive, setWallToolActive] = useState(false);
   const wallSessionIdRef = useRef(null);
   const [floorDark, setFloorDark] = useState(false);
-  const floorColorRef = useRef("#212121");
+  const floorColorRef = useRef("#878787");
   useEffect(() => { floorColorRef.current = floorColor; }, [floorColor]);
   const [measureToolActive, setMeasureToolActive] = useState(false);
   const measureToolActiveRef = useRef(false);
@@ -655,7 +655,7 @@ export default function BoothPlannerV2() {
     // ---- Floor ----
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshStandardMaterial({ color: 0x212121, roughness: 0.85, metalness: 0.05 })
+      new THREE.MeshStandardMaterial({ color: 0x878787, roughness: 0.85, metalness: 0.05 })
     );
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
@@ -3153,7 +3153,7 @@ export default function BoothPlannerV2() {
       if (!window.confirm("Start a new project? All unsaved changes will be lost.")) return;
     }
     setItems([]); setWalls([]); setCameras([]);
-    setFloorW(10); setFloorD(8); setFloorColor("#212121");
+    setFloorW(10); setFloorD(8); setFloorColor("#878787");
     setFloorPlan(null);
     setWallConfig({ height: 2.4, glassRatio: 0, thickness: 0.1, color: "#cccccc" });
     setProjectName("Untitled Project");
