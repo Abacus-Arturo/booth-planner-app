@@ -35,6 +35,16 @@ const PRIMITIVES = [
 // Props: objetos pequeños con posición/altura libres, que se pueden "pegar" (attach) a otro objeto arrastrándolos encima.
 const PROPS = [];
 
+// ===================== Group hierarchy helpers (max 3 levels) =====================
+// groupIds: [] = no group, ["g1"] = in one group, ["g1","g2"] = g1 inside g2, etc.
+// Index 0 = innermost, last index = outermost (active for selection/drag)
+const getGroupIds = (it) => Array.isArray(it?.groupIds) ? it.groupIds : (it?.groupId ? [it.groupId] : []);
+const getOuterGroupId = (it) => { const ids = getGroupIds(it); return ids.length ? ids[ids.length - 1] : null; };
+const getInnerGroupId = (it) => { const ids = getGroupIds(it); return ids.length ? ids[0] : null; };
+const withOuterGroup = (it, gid) => ({ ...it, groupIds: [...getGroupIds(it), gid], groupId: undefined });
+const withoutOuterGroup = (it) => { const ids = getGroupIds(it); return { ...it, groupIds: ids.slice(0, -1), groupId: undefined }; };
+const migrateItem = (it) => it.groupIds ? it : { ...it, groupIds: it.groupId ? [it.groupId] : [], groupId: undefined };
+
 function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
 }
@@ -95,6 +105,15 @@ function buildWallMesh(wall) {
   group.userData.isWall = true;
   return group;
 }
+
+// Colors per nesting level for selection outline (outermost = index 0 of reversed groupIds)
+const GROUP_LEVEL_COLORS = [
+  0xff6a00, // level 1 — orange (default, no group)
+  0x00e5ff, // level 2 — cyan
+  0xa855f7, // level 3 — purple
+  0xf59e0b, // level 4 — amber
+  0x4ade80, // level 5+ — green
+];
 
 function buildOutlineBox(w, h, d) {
   const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w * 1.12 + 0.03, h * 1.12 + 0.03, d * 1.12 + 0.03));
@@ -463,7 +482,7 @@ export default function BoothPlannerV2() {
   }, [catalog]);
   const findDefRef = useRef(findDef);
   useEffect(() => { findDefRef.current = findDef; }, [findDef]);
-  const [items, setItems] = useState([]); // {uid, catalogId, kind, x,z,rotY,color,sockets,groupId}
+  const [items, setItems] = useState([]); // {uid, catalogId, kind, x,z,rotY,color,sockets,groupIds}
   const [walls, setWalls] = useState([]); // {uid, x1,z1,x2,z2, height, glassRatio, thickness, color}
   const wallsRef = useRef(walls);
   useEffect(() => { wallsRef.current = walls; }, [walls]);
@@ -528,6 +547,9 @@ export default function BoothPlannerV2() {
     return next;
   });
   const wallStateRef = useRef({ active: false, start: null, end: null });
+  // tracks which nesting level the user is currently "inside" for click selection
+  // -1 = outermost (last groupIds index), going down toward 0 (innermost) on dblclick
+  const selectionDepthRef = useRef(null); // null = not in a group context
   const wallConfigRef = useRef(wallConfig);
   useEffect(() => { wallConfigRef.current = wallConfig; }, [wallConfig]);
   const wallToolActiveRef = useRef(false);
@@ -1057,7 +1079,7 @@ export default function BoothPlannerV2() {
             newItems.push({
               uid: `${def.id}_${Date.now()}_ln${i}`,
               catalogId: def.id, kind, x: pos.x, z: pos.z, rotY: angle,
-              color: varyColor(baseColor, i), sockets: {}, groupId,
+              color: varyColor(baseColor, i), sockets: {}, groupIds: [groupId],
               pivotX: ls.start.x, pivotZ: ls.start.z,
             });
           }
@@ -1092,7 +1114,7 @@ export default function BoothPlannerV2() {
               }
             } else if (h.userData.isLineHandle) {
               const groupId = h.userData.groupId;
-              const groupItems = itemsRef.current.filter((it) => it.groupId === groupId);
+              const groupItems = itemsRef.current.filter((it) => getOuterGroupId(it) === groupId);
               if (groupItems.length) {
                 const pivot = { x: h.userData.pivotX, z: h.userData.pivotZ };
                 const src = [...groupItems].sort((a, b) =>
@@ -1200,38 +1222,92 @@ export default function BoothPlannerV2() {
         dragArmed = false;
         dragStartScreenX = e.clientX; dragStartScreenY = e.clientY;
         const clickedItem = itemsRef.current.find((it) => it.uid === draggingUid);
-        const groupId = clickedItem && clickedItem.groupId;
-        if (groupId && !e.shiftKey) {
-          // click normal sobre un objeto agrupado: selecciona todo el grupo
-          const groupUids = itemsRef.current.filter((it) => it.groupId === groupId).map((it) => it.uid);
-          threeRef.current.setSelectedGroup(groupUids);
+        const clickedGroupIds = getGroupIds(clickedItem);
+
+        if (clickedGroupIds.length && !e.shiftKey) {
+          const startPt = groundPoint(e.clientX, e.clientY);
+          // if the clicked item is already part of the current selection, keep the whole selection
+          if (selectedUidsRef.current.includes(draggingUid)) {
+            dragOffsetsRef.current = {};
+            selectedUidsRef.current.forEach((uid) => {
+              const it = itemsRef.current.find((i) => i.uid === uid);
+              if (it) dragOffsetsRef.current[uid] = {
+                dx: it.x - startPt.x, dz: it.z - startPt.z,
+                pivotDx: it.pivotX != null ? it.pivotX - startPt.x : null,
+                pivotDz: it.pivotZ != null ? it.pivotZ - startPt.z : null,
+              };
+            });
+          } else {
+            // determine which level to select based on selectionDepthRef
+            const depth = selectionDepthRef.current;
+            let activeLevel;
+            if (depth === null || depth >= clickedGroupIds.length) {
+              activeLevel = clickedGroupIds.length - 1; // outermost
+            } else {
+              activeLevel = depth;
+            }
+            selectionDepthRef.current = activeLevel;
+            const activeGroupId = clickedGroupIds[activeLevel];
+            // select all items that contain this groupId anywhere in their groupIds array
+            const groupUids = itemsRef.current
+              .filter((it) => getGroupIds(it).includes(activeGroupId))
+              .map((it) => it.uid);
+            threeRef.current.setSelectedGroup(groupUids);
+            dragOffsetsRef.current = {};
+            groupUids.forEach((uid) => {
+              const it = itemsRef.current.find((i) => i.uid === uid);
+              if (it) dragOffsetsRef.current[uid] = {
+                dx: it.x - startPt.x, dz: it.z - startPt.z,
+                pivotDx: it.pivotX != null ? it.pivotX - startPt.x : null,
+                pivotDz: it.pivotZ != null ? it.pivotZ - startPt.z : null,
+              };
+            });
+          }
+        } else if (clickedGroupIds.length && e.shiftKey) {
+          // Shift+click on a grouped item: add/remove whole outer group to selection
+          const activeGroupId = clickedGroupIds[clickedGroupIds.length - 1]; // outermost
+          const groupUids = itemsRef.current
+            .filter((it) => getGroupIds(it).includes(activeGroupId))
+            .map((it) => it.uid);
+          const alreadySelected = groupUids.every((uid) => selectedUidsRef.current.includes(uid));
+          const newSelection = alreadySelected
+            ? selectedUidsRef.current.filter((uid) => !groupUids.includes(uid))
+            : [...new Set([...selectedUidsRef.current, ...groupUids])];
+          threeRef.current.setSelectedGroup(newSelection);
+          // drag offsets for entire new selection
+          const startPt = groundPoint(e.clientX, e.clientY);
+          dragOffsetsRef.current = {};
+          newSelection.forEach((uid) => {
+            const it = itemsRef.current.find((i) => i.uid === uid);
+            if (it) dragOffsetsRef.current[uid] = {
+              dx: it.x - startPt.x, dz: it.z - startPt.z,
+              pivotDx: it.pivotX != null ? it.pivotX - startPt.x : null,
+              pivotDz: it.pivotZ != null ? it.pivotZ - startPt.z : null,
+            };
+          });
         } else {
           threeRef.current.setSelected(draggingUid, e.shiftKey);
-        }
-        // preparar offsets para mover el grupo entero junto (si el seleccionado termina siendo un grupo)
-        const startPt = groundPoint(e.clientX, e.clientY);
-        let groupUidsForDrag;
-        if (groupId && !e.shiftKey) {
-          groupUidsForDrag = itemsRef.current.filter((it) => it.groupId === groupId).map((it) => it.uid);
-        } else {
-          // incluir todos los seleccionados actualmente (multiselección manual con Shift)
+          if (!e.shiftKey) selectionDepthRef.current = null;
+          const startPt = groundPoint(e.clientX, e.clientY);
           const currentSelected = selectedUidsRef.current;
-          groupUidsForDrag = currentSelected.includes(draggingUid)
+          // if clicking an already-selected item, drag all selected together
+          const groupUidsForDrag = currentSelected.includes(draggingUid)
             ? currentSelected
             : [draggingUid];
+          dragOffsetsRef.current = {};
+          groupUidsForDrag.forEach((uid) => {
+            const it = itemsRef.current.find((i) => i.uid === uid);
+            if (it) dragOffsetsRef.current[uid] = {
+              dx: it.x - startPt.x, dz: it.z - startPt.z,
+              pivotDx: it.pivotX != null ? it.pivotX - startPt.x : null,
+              pivotDz: it.pivotZ != null ? it.pivotZ - startPt.z : null,
+            };
+          });
         }
-        dragOffsetsRef.current = {};
-        groupUidsForDrag.forEach((uid) => {
-          const it = itemsRef.current.find((i) => i.uid === uid);
-          if (it) dragOffsetsRef.current[uid] = {
-            dx: it.x - startPt.x, dz: it.z - startPt.z,
-            pivotDx: it.pivotX != null ? it.pivotX - startPt.x : null,
-            pivotDz: it.pivotZ != null ? it.pivotZ - startPt.z : null,
-          };
-        });
       } else {
         threeRef.current.setSelected(null);
         threeRef.current.setSelectedWall(null);
+        selectionDepthRef.current = null;
       }
     };
     const SNAP_STEP = Math.PI / 4; // 45°
@@ -1369,7 +1445,7 @@ export default function BoothPlannerV2() {
             if (src._isGroupArray) {
               uidsToHide = src._groupUids || [];
             } else if (existingGroupId) {
-              uidsToHide = itemsRef.current.filter((it) => it.groupId === existingGroupId).map((it) => it.uid);
+              uidsToHide = itemsRef.current.filter((it) => getOuterGroupId(it) === existingGroupId).map((it) => it.uid);
             } else {
               uidsToHide = [src.uid];
             }
@@ -1587,7 +1663,7 @@ export default function BoothPlannerV2() {
           const src = arrayHandleSourceRef.current;
           if (src && !src._isGroupArray) {
             const groupItems = existingGroupId
-              ? itemsRef.current.filter((it) => it.groupId === existingGroupId)
+              ? itemsRef.current.filter((it) => getOuterGroupId(it) === existingGroupId)
               : [src];
             const def = findDefRef.current(src.kind, src.catalogId);
             const objWidth = def?.w || 1;
@@ -1627,7 +1703,7 @@ export default function BoothPlannerV2() {
               catalogId: src.catalogId, kind: src.kind,
               x: newPos.x, z: newPos.z, rotY: src.rotY,
               color: varyColor(src.color || "#888888", groupItems.length),
-              sockets: { ...src.sockets }, groupId,
+              sockets: { ...src.sockets }, groupIds: [groupId],
               pivotX: src.pivotX ?? src.x, pivotZ: src.pivotZ ?? src.z,
             };
 
@@ -1663,8 +1739,8 @@ export default function BoothPlannerV2() {
 
           if (existingGroupId) {
             setItems((prev) => {
-              const groupItems = prev.filter((it) => it.groupId === existingGroupId);
-              const nonGroup = prev.filter((it) => it.groupId !== existingGroupId);
+              const groupItems = prev.filter((it) => getOuterGroupId(it) === existingGroupId);
+              const nonGroup = prev.filter((it) => getOuterGroupId(it) !== existingGroupId);
               const total = n + 1;
               const newGroup = [];
               for (let i = 0; i < total; i++) {
@@ -1677,7 +1753,7 @@ export default function BoothPlannerV2() {
                     uid: `${src.catalogId}_${Date.now()}_arr${i}`,
                     catalogId: src.catalogId, kind: src.kind,
                     x: pos.x, z: pos.z, rotY: angle,
-                    color: varyColor(baseColor, i), sockets: { ...src.sockets }, groupId: existingGroupId,
+                    color: varyColor(baseColor, i), sockets: { ...src.sockets }, groupIds: [existingGroupId],
                     pivotX: origin.x, pivotZ: origin.z,
                   });
               }
@@ -1701,7 +1777,8 @@ export default function BoothPlannerV2() {
                 newItems.push({
                   ...it, uid,
                   x: it.x + offset.x, z: it.z + offset.z,
-                  groupId: newGroupId,
+                  groupIds: [newGroupId],
+                  groupId: undefined,
                   pivotX: (it.pivotX ?? it.x) + offset.x,
                   pivotZ: (it.pivotZ ?? it.z) + offset.z,
                 });
@@ -1720,7 +1797,7 @@ export default function BoothPlannerV2() {
                 uid: `${src.catalogId}_${Date.now()}_arr${i}`,
                 catalogId: src.catalogId, kind: src.kind,
                 x: pos.x, z: pos.z, rotY: angle,
-                color: varyColor(baseColor, i), sockets: { ...src.sockets }, groupId,
+                color: varyColor(baseColor, i), sockets: { ...src.sockets }, groupIds: [groupId],
                 pivotX: origin.x, pivotZ: origin.z,
               });
             }
@@ -1779,7 +1856,24 @@ export default function BoothPlannerV2() {
       if (hits.length) {
         let obj = hits[0].object;
         while (obj.parent && obj.parent !== itemGroup) obj = obj.parent;
-        threeRef.current.setSelectedGroup([obj.userData.uid]);
+        const uid = obj.userData.uid;
+        const clickedItem = itemsRef.current.find((it) => it.uid === uid);
+        const ids = getGroupIds(clickedItem);
+        const currentDepth = selectionDepthRef.current;
+        if (ids.length && currentDepth !== null && currentDepth > 0) {
+          // drill one level inward — find the groupId one level in from current
+          const newDepth = currentDepth - 1;
+          selectionDepthRef.current = newDepth;
+          const activeGroupId = ids[newDepth];
+          const groupUids = itemsRef.current
+            .filter((it) => getGroupIds(it).includes(activeGroupId))
+            .map((it) => it.uid);
+          threeRef.current.setSelectedGroup(groupUids);
+        } else {
+          // already at innermost or no group — select individual item
+          selectionDepthRef.current = null;
+          threeRef.current.setSelectedGroup([uid]);
+        }
       }
     };
     dom.addEventListener("dblclick", onDblClick);
@@ -1824,6 +1918,22 @@ export default function BoothPlannerV2() {
       measureGroup, measurePreviewLine, measurePreviewLabel, measureStartDot, makeMeasureLabel,
       target, getRadiusThetaPhi: () => ({ radius, theta, phi }),
       setRadiusThetaPhi: (r, t, p) => { radius = r; theta = t; phi = p; updateCamera(); },
+      focusOn: (x, y, z) => {
+        const startTarget = target.clone();
+        const endTarget = new THREE.Vector3(x, 0, z);
+        const startRadius = radius;
+        const endRadius = Math.max(4, startRadius * 0.7);
+        const dur = 500; const t0 = performance.now();
+        const step = () => {
+          const t = Math.min((performance.now() - t0) / dur, 1);
+          const e = 1 - Math.pow(1 - t, 3); // ease out cubic
+          target.lerpVectors(startTarget, endTarget, e);
+          radius = startRadius + (endRadius - startRadius) * e;
+          updateCamera();
+          if (t < 1) requestAnimationFrame(step);
+        };
+        step();
+      },
       getActiveCamera: () => activeCam,
       syncSize: onResize,
       setView: (name) => { setView(name); threeRef.current.viewName = name; setViewUIRef.current && setViewUIRef.current(name); },
@@ -1897,17 +2007,17 @@ export default function BoothPlannerV2() {
         return endpoint === 'start' ? { ...w, x1: x, z1: z } : { ...w, x2: x, z2: z };
       })),
       setOriginalRotation: (uid, rotY) => setItems((prev) => prev.map((it) => it.uid === uid ? { ...it, rotY } : it)),
-      addToGroup: (uid, groupId, pivotX, pivotZ, rotY) => setItems((prev) => prev.map((it) => it.uid === uid ? { ...it, groupId, pivotX, pivotZ, rotY } : it)),
+      addToGroup: (uid, groupId, pivotX, pivotZ, rotY) => setItems((prev) => prev.map((it) => it.uid === uid ? { ...it, groupIds: [groupId], groupId: undefined, pivotX, pivotZ, rotY } : it)),
       redistributeLineGroup: (groupId, pivotX, pivotZ, endX, endZ) => {
         setItems((prev) => {
-          const groupItems = prev.filter((it) => it.groupId === groupId);
+          const groupItems = prev.filter((it) => getOuterGroupId(it) === groupId);
           if (groupItems.length < 2) return prev;
           const n = groupItems.length;
           const angle = Math.atan2(endX - pivotX, endZ - pivotZ);
           const origin = new THREE.Vector3(pivotX, 0, pivotZ);
           const end = new THREE.Vector3(endX, 0, endZ);
           return prev.map((it) => {
-            if (it.groupId !== groupId) return it;
+            if (getOuterGroupId(it) !== groupId) return it;
             const idx = groupItems.indexOf(it);
             if (idx === 0) return { ...it, rotY: angle }; // original stays at pivot, just rotates
             const t = idx / (n - 1);
@@ -2135,19 +2245,22 @@ export default function BoothPlannerV2() {
     // Group handles
     if (selectedUids.length > 1) {
       const selItems = items.filter((it) => selectedUids.includes(it.uid));
-      const allSameGroup = selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
-      if (allSameGroup && selItems[0].pivotX != null) {
+      const outerGroupId0 = getOuterGroupId(selItems[0]);
+      const innerGroupId0 = getInnerGroupId(selItems[0]);
+      const allSameOuterGroup = selItems.every((it) => getOuterGroupId(it) && getOuterGroupId(it) === outerGroupId0);
+      const allSameInnerGroup = selItems.every((it) => getInnerGroupId(it) && getInnerGroupId(it) === innerGroupId0);
+      // cyan re-edit handle: only show when all items share the same innermost group (a single line array)
+      if (allSameInnerGroup && selItems[0].pivotX != null) {
         const sorted = [...selItems].sort((a, b) => {
           const da = Math.hypot(a.x - selItems[0].pivotX, a.z - (selItems[0].pivotZ ?? 0));
           const db = Math.hypot(b.x - selItems[0].pivotX, b.z - (selItems[0].pivotZ ?? 0));
           return da - db;
         });
         const last = sorted[sorted.length - 1];
-        // cyan re-edit handle
         const cyanSprite = makeHandleSprite(0x00e5ff);
         cyanSprite.position.set(last.x, 0.5, last.z);
         cyanSprite.userData.isLineHandle = true;
-        cyanSprite.userData.groupId = selItems[0].groupId;
+        cyanSprite.userData.groupId = innerGroupId0;
         cyanSprite.userData.role = 'end';
         cyanSprite.userData.pivotX = selItems[0].pivotX;
         cyanSprite.userData.pivotZ = selItems[0].pivotZ ?? 0;
@@ -2427,7 +2540,14 @@ export default function BoothPlannerV2() {
 
       const realModel = container.children.find((c) => !c.userData.isPlaceholder && !c.userData.isOutline);
       const isSelected = selectedUids.includes(it.uid);
-      if (container.userData.outline) container.userData.outline.visible = isSelected;
+      if (container.userData.outline) {
+        container.userData.outline.visible = isSelected;
+        if (isSelected) {
+          const depth = getGroupIds(it).length; // 0 = no group, 1 = one level, etc.
+          const colorIdx = Math.min(depth, GROUP_LEVEL_COLORS.length - 1);
+          container.userData.outline.material.color.setHex(GROUP_LEVEL_COLORS[colorIdx]);
+        }
+      }
 
       if (realModel) {
         applyColorToContainer(realModel, it.color || def.color || "#888888", def);
@@ -2736,25 +2856,24 @@ export default function BoothPlannerV2() {
           const delta = (e.key === "ArrowLeft" ? -1 : 1) * (deg * Math.PI / 180);
           setItems((prev) => {
             const selItems = prev.filter((it) => selectedUids.includes(it.uid));
-            const allSameGroup = selItems.length > 1 && selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
-            if (allSameGroup) {
-              if (e.altKey) {
-                // Shift+Alt = cada objeto rota en su propio origen
-                return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
-              } else {
-                // Shift = todo el grupo rota alrededor del pivote
-                const pivotItem = selItems.find((it) => it.pivotX != null) || selItems[0];
-                const pivotX = pivotItem.pivotX ?? pivotItem.x;
-                const pivotZ = pivotItem.pivotZ ?? pivotItem.z;
-                const axis = new THREE.Vector3(0, 1, 0);
-                return prev.map((it) => {
-                  if (!selectedUids.includes(it.uid)) return it;
-                  const rel = new THREE.Vector3(it.x - pivotX, 0, it.z - pivotZ).applyAxisAngle(axis, delta);
-                  return { ...it, x: pivotX + rel.x, z: pivotZ + rel.z, rotY: it.rotY + delta };
-                });
-              }
+            if (e.altKey) {
+              // Shift+Alt = cada objeto rota en su propio origen
+              return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
             }
-            // objeto individual: Shift rota
+            // rotar alrededor del pivote formal si hay grupo, o centroide si es selección manual
+            const allSameGroup = selItems.length > 1 && selItems.every((it) => getOuterGroupId(it) && getOuterGroupId(it) === getOuterGroupId(selItems[0]));
+            const pivotItem = allSameGroup ? (selItems.find((it) => it.pivotX != null) || selItems[0]) : null;
+            const pivotX = pivotItem ? (pivotItem.pivotX ?? pivotItem.x) : selItems.reduce((s, it) => s + it.x, 0) / selItems.length;
+            const pivotZ = pivotItem ? (pivotItem.pivotZ ?? pivotItem.z) : selItems.reduce((s, it) => s + it.z, 0) / selItems.length;
+            if (selItems.length > 1) {
+              const axis = new THREE.Vector3(0, 1, 0);
+              return prev.map((it) => {
+                if (!selectedUids.includes(it.uid)) return it;
+                const rel = new THREE.Vector3(it.x - pivotX, 0, it.z - pivotZ).applyAxisAngle(axis, delta);
+                return { ...it, x: pivotX + rel.x, z: pivotZ + rel.z, rotY: it.rotY + delta };
+              });
+            }
+            // objeto individual
             return prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it);
           });
         } else {
@@ -2798,26 +2917,40 @@ export default function BoothPlannerV2() {
         return;
       }
 
-      if (!selectedUids.length) return;
-      if ((e.key === "d" || e.key === "D") && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        duplicateSelectedRef.current();
-        return;
-      }
       if (e.key === "Delete" || e.key === "Backspace") {
-        // Si hay pared o objetos seleccionados, borrar siempre (ignora input)
         if (selectedWallUid) {
           e.preventDefault();
-          setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid));
+          const selWall = wallsRef.current.find((w) => w.uid === selectedWallUid);
+          setWalls((prev) => prev.filter((w) =>
+            selWall?.groupId ? w.groupId !== selWall.groupId : w.uid !== selectedWallUid
+          ));
           setSelectedWallUid(null);
           return;
         }
         if (selectedUids.length > 0) {
-          if (inInput) return; // solo bloquear si escribe en input y no hay selección
+          if (inInput) return;
           e.preventDefault();
           setItems((prev) => prev.filter((it) => !selectedUids.includes(it.uid)));
           setSelectedUids([]);
         }
+        return;
+      }
+
+      if (!selectedUids.length) return;
+      if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        const selItems = items.filter((it) => selectedUids.includes(it.uid));
+        if (selItems.length) {
+          const cx = selItems.reduce((s, it) => s + it.x, 0) / selItems.length;
+          const cz = selItems.reduce((s, it) => s + it.z, 0) / selItems.length;
+          threeRef.current.focusOn(cx, 0, cz);
+        }
+        return;
+      }
+      if ((e.key === "d" || e.key === "D") && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        duplicateSelectedRef.current();
+        return;
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -2863,8 +2996,8 @@ export default function BoothPlannerV2() {
   const selectedItem = items.find((i) => i.uid === selectedUid);
   const selectedDef = selectedItem && findDef(selectedItem.kind, selectedItem.catalogId);
   const rightPanelOpen = !!(selectedItem && selectedDef);
-  const isWholeGroupSelected = selectedUids.length > 1 && selectedItem?.groupId &&
-    items.filter((it) => selectedUids.includes(it.uid)).every((it) => it.groupId === selectedItem.groupId);
+  const isWholeGroupSelected = selectedUids.length > 1 && getOuterGroupId(selectedItem) &&
+    items.filter((it) => selectedUids.includes(it.uid)).every((it) => getOuterGroupId(it) === getOuterGroupId(selectedItem));
 
   const updateSelected = (patch) => setItems((prev) => prev.map((it) => (it.uid === selectedUid ? { ...it, ...patch } : it)));
   const updateGroup = (patch) => setItems((prev) => prev.map((it) => (selectedUids.includes(it.uid) ? { ...it, ...patch } : it)));
@@ -2890,12 +3023,17 @@ export default function BoothPlannerV2() {
     const delta = deltaDeg * Math.PI / 180;
     setItems((prev) => prev.map((it) => selectedUids.includes(it.uid) ? { ...it, rotY: it.rotY + delta } : it));
   };
-  // rotar todo el grupo alrededor del pivote
+  // rotar todo el grupo alrededor del pivote (o centroide si no hay pivote formal)
   const rotateGroupAroundPivot = (deltaDeg) => {
-    if (!selectedItem?.groupId) return;
+    if (!selectedUids.length) return;
     const delta = deltaDeg * Math.PI / 180;
-    const pivotX = selectedItem.pivotX ?? selectedItem.x;
-    const pivotZ = selectedItem.pivotZ ?? selectedItem.z;
+    const selItems = items.filter((it) => selectedUids.includes(it.uid));
+    // use formal pivot if all share the same group, otherwise use centroid
+    const outerGroup = getOuterGroupId(selectedItem);
+    const allSameGroup = outerGroup && selItems.every((it) => getGroupIds(it).includes(outerGroup));
+    const pivotItem = allSameGroup ? selItems.find((it) => it.pivotX != null) : null;
+    const pivotX = pivotItem ? pivotItem.pivotX : selItems.reduce((s, it) => s + it.x, 0) / selItems.length;
+    const pivotZ = pivotItem ? pivotItem.pivotZ : selItems.reduce((s, it) => s + it.z, 0) / selItems.length;
     setItems((prev) => prev.map((it) => {
       if (!selectedUids.includes(it.uid)) return it;
       const dx = it.x - pivotX, dz = it.z - pivotZ;
@@ -2907,20 +3045,21 @@ export default function BoothPlannerV2() {
   const duplicateSelected = () => {
     if (!selectedUids.length) return;
     const offset = 0.4;
-    const groupRemap = {}; // groupId viejo -> groupId nuevo (para que la copia de un grupo sea su propio grupo independiente)
+    const groupRemap = {}; // remap each groupIds level independently
     const selItems = items.filter((it) => selectedUids.includes(it.uid));
     const newItems = selItems.map((it, idx) => {
-      let newGroupId = it.groupId;
-      if (it.groupId) {
-        if (!groupRemap[it.groupId]) groupRemap[it.groupId] = `${it.groupId}_copy_${Date.now()}`;
-        newGroupId = groupRemap[it.groupId];
-      }
+      const oldIds = getGroupIds(it);
+      const newIds = oldIds.map((gid) => {
+        if (!groupRemap[gid]) groupRemap[gid] = `${gid}_copy_${Date.now()}`;
+        return groupRemap[gid];
+      });
       return {
         ...it,
         uid: `${it.catalogId}_${Date.now()}_dup${idx}_${Math.random().toString(36).slice(2, 5)}`,
         x: it.x + offset,
         z: it.z + offset,
-        groupId: newGroupId,
+        groupIds: newIds,
+        groupId: undefined,
         pivotX: it.pivotX != null ? it.pivotX + offset : it.pivotX,
         pivotZ: it.pivotZ != null ? it.pivotZ + offset : it.pivotZ,
       };
@@ -2945,8 +3084,8 @@ export default function BoothPlannerV2() {
       return sockets;
     };
     // si hay grupo completo seleccionado (2+ piezas del mismo grupo), propagar a todos
-    const isWholeGroup = selectedUids.length > 1 && selectedItem.groupId &&
-      items.filter((it) => selectedUids.includes(it.uid)).every((it) => it.groupId === selectedItem.groupId);
+    const isWholeGroup = selectedUids.length > 1 && getOuterGroupId(selectedItem) &&
+      items.filter((it) => selectedUids.includes(it.uid)).every((it) => getOuterGroupId(it) === getOuterGroupId(selectedItem));
     if (isWholeGroup) {
       setItems((prev) => prev.map((it) =>
         selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it
@@ -2964,8 +3103,8 @@ export default function BoothPlannerV2() {
       return sockets;
     };
     // propagar al grupo completo si está todo el grupo seleccionado
-    const isWholeGroup = selectedUids.length > 1 && selectedItem.groupId &&
-      items.filter((it) => selectedUids.includes(it.uid)).every((it) => it.groupId === selectedItem.groupId);
+    const isWholeGroup = selectedUids.length > 1 && getOuterGroupId(selectedItem) &&
+      items.filter((it) => selectedUids.includes(it.uid)).every((it) => getOuterGroupId(it) === getOuterGroupId(selectedItem));
     if (isWholeGroup) {
       setItems((prev) => prev.map((it) =>
         selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it
@@ -3101,7 +3240,7 @@ export default function BoothPlannerV2() {
     if (data.floorD) setFloorD(data.floorD);
     if (data.floorColor) setFloorColor(data.floorColor);
     setFloorPlan(data.floorPlan || null);
-    setItems(data.items || []);
+    setItems((data.items || []).map(migrateItem));
     setWalls(data.walls || []);
     setCameras(data.cameras || []);
     if (data.catalogColors) setCatalogColors(data.catalogColors);
@@ -3674,9 +3813,9 @@ export default function BoothPlannerV2() {
                 onChange={(e) => setWallConfig((c) => ({ ...c, color: e.target.value }))}
                 style={{ width: "100%", height: 32, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none" }} />
             </div>
-            {walls.length > 0 && (
+            {walls.some((w) => w.type !== "column") && (
               <div style={{ display: "flex", alignItems: "flex-end" }}>
-                <button onClick={() => setWalls([])} style={{ background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "7px 12px", fontSize: 11, cursor: "pointer" }}>Clear all</button>
+                <button onClick={() => setWalls((prev) => prev.filter((w) => w.type === "column"))} style={{ background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "7px 12px", fontSize: 11, cursor: "pointer" }}>Clear all</button>
               </div>
             )}
           </div>
@@ -3753,6 +3892,12 @@ export default function BoothPlannerV2() {
                 style={{ width: "100%", height: 28, border: "1px solid #1e2035", borderRadius: 6, padding: 2, cursor: "pointer", background: "none" }} />
             </div>
           </div>
+          {walls.some((w) => w.type === "column") && (
+            <button onClick={() => setWalls((prev) => prev.filter((w) => w.type !== "column"))}
+              style={{ width: "100%", background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "7px 12px", fontSize: 11, cursor: "pointer", marginTop: 4 }}>
+              Clear all columns
+            </button>
+          )}
         </Section>
 
       </div>
@@ -4123,9 +4268,14 @@ export default function BoothPlannerV2() {
                 </button>
               )}
               <button
-                onClick={() => { setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid)); setSelectedWallUid(null); }}
+                onClick={() => {
+                  setWalls((prev) => prev.filter((w) =>
+                    selWall.groupId ? w.groupId !== selWall.groupId : w.uid !== selectedWallUid
+                  ));
+                  setSelectedWallUid(null);
+                }}
                 style={{ width: "100%", background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
-                Delete Wall
+                {selWall.groupId ? "Delete Wall Group" : "Delete Wall"}
               </button>
             </>
           );
@@ -4143,21 +4293,29 @@ export default function BoothPlannerV2() {
           {/* Group card */}
           {(() => {
             const selItems = items.filter((it) => selectedUids.includes(it.uid));
-            const allSameGroup = selItems.length > 1 && selItems.every((it) => it.groupId && it.groupId === selItems[0].groupId);
-            const hasAnyGroup = selItems.some((it) => it.groupId);
-            const isPartOfGroup = selectedUids.length === 1 && selectedItem?.groupId;
+            const outerGroupId0 = getOuterGroupId(selItems[0]);
+            const innerGroupId0 = getInnerGroupId(selItems[0]);
+            const allSameOuterGroup = selItems.length > 1 && selItems.every((it) => getOuterGroupId(it) && getOuterGroupId(it) === outerGroupId0);
+            const allSameInnerGroup = selItems.length > 1 && selItems.every((it) => getInnerGroupId(it) && getInnerGroupId(it) === innerGroupId0);
+            // "allSameGroup" for UI purposes = same outer group (could be super-group or single array)
+            const allSameGroup = allSameOuterGroup;
+            // array spacing panel only makes sense when all share the same innermost group
+            const showArrayPanel = allSameInnerGroup && selItems[0].pivotX != null;
+            const hasAnyGroup = selItems.some((it) => getGroupIds(it).length > 0);
+            const isPartOfGroup = selectedUids.length === 1 && getGroupIds(selectedItem).length > 0;
+            const depth = getGroupIds(selectedItem).length;
 
             // single item in a group
             if (isPartOfGroup) return (
               <div style={{ background: "#0e1a14", border: "1px solid #1a3a28", borderRadius: 10, padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                  <span style={{ fontSize: 11, color: "#4ade80", fontWeight: 600 }}>Part of a group</span>
+                  <span style={{ fontSize: 11, color: "#4ade80", fontWeight: 600 }}>Part of a group {depth > 1 ? `(${depth} levels deep)` : ""}</span>
                 </div>
-                <div style={{ fontSize: 10, color: "#64748b", marginBottom: 8, lineHeight: 1.5 }}>Click any piece = select group · Double-click = this piece only</div>
-                <button onClick={() => setItems((prev) => prev.map((it) => it.uid === selectedItem.uid ? { ...it, groupId: null } : it))}
+                <div style={{ fontSize: 10, color: "#64748b", marginBottom: 8, lineHeight: 1.5 }}>Click = select outer group · Double-click = go one level in</div>
+                <button onClick={() => setItems((prev) => prev.map((it) => it.uid === selectedItem.uid ? withoutOuterGroup(it) : it))}
                   style={{ width: "100%", background: "#13162a", border: "1px solid #1e2035", borderRadius: 7, color: "#94a3b8", padding: "6px", fontSize: 11, cursor: "pointer", fontWeight: 500 }}>
-                  Remove from group
+                  Remove from outer group
                 </button>
               </div>
             );
@@ -4177,6 +4335,8 @@ export default function BoothPlannerV2() {
                   </div>
                 )}
                 {allSameGroup && selItems[0].pivotX != null && (() => {
+                  // only show array spacing panel when all items share the same inner group
+                  if (!showArrayPanel) return null;
                   // calcular espaciado actual
                   const sorted = [...selItems].sort((a, b) => {
                     const px = selItems[0].pivotX; const pz = selItems[0].pivotZ ?? 0;
@@ -4209,7 +4369,7 @@ export default function BoothPlannerV2() {
                                 // queda solo 1 — desagrupar
                                 setItems((prev) => prev
                                   .filter((it) => it.uid !== last.uid)
-                                  .map((it) => it.uid === remaining[0].uid ? { ...it, groupId: null } : it));
+                                  .map((it) => it.uid === remaining[0].uid ? withoutOuterGroup(it) : it));
                                 setTimeout(() => threeRef.current.setSelectedGroup([remaining[0].uid]), 0);
                               } else {
                                 const newUids = selectedUids.filter((uid) => uid !== last.uid);
@@ -4226,7 +4386,7 @@ export default function BoothPlannerV2() {
                                 catalogId: last.catalogId, kind: last.kind,
                                 x: newPos.x, z: newPos.z, rotY: last.rotY,
                                 color: varyColor(last.color, sorted.length),
-                                sockets: { ...last.sockets }, groupId: last.groupId,
+                                sockets: { ...last.sockets }, groupIds: getGroupIds(last),
                                 pivotX: sorted[0].x, pivotZ: sorted[0].z,
                               };
                               threeRef.current.commitLineItems([newItem]);
@@ -4260,21 +4420,21 @@ export default function BoothPlannerV2() {
                   );
                 })()}
                 <div style={{ display: "flex", gap: 6 }}>
-                  {!allSameGroup && (
-                    <button onClick={() => {
-                      const groupId = `group_${Date.now()}`;
+                  <button
+                    disabled={allSameOuterGroup}
+                    onClick={() => {
+                      const newGroupId = `group_${Date.now()}`;
                       const cx = selItems.reduce((s, it) => s + it.x, 0) / selItems.length;
                       const cz = selItems.reduce((s, it) => s + it.z, 0) / selItems.length;
                       setItems((prev) => prev.map((it) => selectedUids.includes(it.uid)
-                        ? { ...it, groupId, pivotX: cx, pivotZ: cz }
+                        ? { ...withOuterGroup(it, newGroupId), pivotX: cx, pivotZ: cz }
                         : it));
                     }}
-                      style={{ flex: 1, background: "#5b4bff", border: "none", borderRadius: 7, color: "#fff", padding: "7px", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>
-                      Group
-                    </button>
-                  )}
+                    style={{ flex: 1, background: allSameOuterGroup ? "#1e2035" : "#5b4bff", border: "none", borderRadius: 7, color: allSameOuterGroup ? "#475569" : "#fff", padding: "7px", fontSize: 11, cursor: allSameOuterGroup ? "default" : "pointer", fontWeight: 600 }}>
+                    Group
+                  </button>
                   {hasAnyGroup && (
-                    <button onClick={() => setItems((prev) => prev.map((it) => selectedUids.includes(it.uid) ? { ...it, groupId: null } : it))}
+                    <button onClick={() => setItems((prev) => prev.map((it) => selectedUids.includes(it.uid) ? withoutOuterGroup(it) : it))}
                       style={{ flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 7, color: "#94a3b8", padding: "7px", fontSize: 11, cursor: "pointer", fontWeight: 500 }}>
                       Ungroup
                     </button>
@@ -4491,22 +4651,15 @@ export default function BoothPlannerV2() {
           <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Actions</div>
             <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-              <button onClick={rotateSelected} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>↻ 90°</button>
+              <button onClick={() => {
+                if (selectedUids.length > 1) {
+                  rotateGroupAroundPivot(90);
+                } else {
+                  rotateSelected();
+                }
+              }} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>↻ 90°</button>
               <button onClick={duplicateSelected} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>Duplicate</button>
-              <button onClick={() => setShowReplaceMenu((s) => !s)} style={{ flex: 1, background: showReplaceMenu ? "#5b4bff" : "#1e2035", border: `1px solid ${showReplaceMenu ? "#5b4bff" : "#2a2f4a"}`, borderRadius: 7, color: showReplaceMenu ? "#fff" : "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>Replace</button>
             </div>
-            {showReplaceMenu && (
-              <div style={{ background: "#0d0f18", border: "1px solid #1e2035", borderRadius: 8, padding: 6, marginBottom: 6, maxHeight: 140, overflowY: "auto" }}>
-                {[...catalog.map((c) => ({ def: c, kind: "model" })), ...PRIMITIVES.map((p) => ({ def: p, kind: "primitive" }))].map(({ def, kind }) => (
-                  <div key={def.id} onClick={() => replaceSelected(def, kind)}
-                    style={{ fontSize: 11, padding: "5px 8px", cursor: "pointer", borderRadius: 6, color: "#94a3b8" }}
-                    onMouseEnter={e => e.currentTarget.style.background = "#1e2035"}
-                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                    {def.name}
-                  </div>
-                ))}
-              </div>
-            )}
             <div style={{ fontSize: 9, color: "#334155", marginBottom: 8 }}>Ctrl/Cmd + D to duplicate</div>
             <button onClick={deleteSelected}
               style={{ width: "100%", background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 7, color: "#f87171", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
