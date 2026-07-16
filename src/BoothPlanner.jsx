@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 
-const APP_VERSION = "1.1.7";
+const APP_VERSION = "1.1.8";
 
 // ===================== Units =====================
 const UNITS = {
@@ -3874,6 +3874,24 @@ export default function BoothPlannerV2() {
           );
         })}
 
+        {/* Island Builder — layout tool for models */}
+        <Section title="Island Builder" defaultOpen={false}>
+          <div style={{ marginBottom: 4 }}>
+            <div style={{ fontSize: 11, color: "#64748b", marginBottom: 10, lineHeight: 1.5 }}>
+              Build island configurations from any model. Paint a layout, set orientations, and place as a group.
+            </div>
+            <button onClick={() => setShowIslandBuilder(true)} style={{
+              width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              background: "linear-gradient(135deg, #5b4bff, #7c6dff)",
+              border: "none", borderRadius: 10, color: "#fff",
+              padding: "11px", fontSize: 13, cursor: "pointer", fontWeight: 600,
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              Open Island Builder
+            </button>
+          </div>
+        </Section>
+
         {/* Primitives */}
         <Section title="Primitives" defaultOpen={false} badge={items.filter((it) => it.kind === "primitive").length || null} visible={layerVisibility.primitives} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, primitives: !v.primitives }))} locked={layerLock.primitives} onLockToggle={() => setLayerLock((v) => ({ ...v, primitives: !v.primitives }))}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -3933,19 +3951,6 @@ export default function BoothPlannerV2() {
             </div>
           </div>
         )}
-
-        {/* Island Builder */}
-        <div style={{ padding: "0 12px 12px" }}>
-          <button onClick={() => setShowIslandBuilder(true)} style={{
-            width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            background: "linear-gradient(135deg, #1e2035, #252845)",
-            border: "1px solid #3d3f6e", borderRadius: 10, color: "#a5b4fc",
-            padding: "11px", fontSize: 13, cursor: "pointer", fontWeight: 600,
-          }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-            Island Builder
-          </button>
-        </div>
 
         {/* Walls & Structure */}
         <Section title="Walls & Structure" defaultOpen={false} badge={walls.length || null} visible={layerVisibility.walls} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, walls: !v.walls }))} locked={layerLock.walls} onLockToggle={() => setLayerLock((v) => ({ ...v, walls: !v.walls }))}>
