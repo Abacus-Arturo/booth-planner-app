@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 
-const APP_VERSION = "1.1.8";
+const APP_VERSION = "1.3.0";
 
 // ===================== Units =====================
 const UNITS = {
@@ -52,7 +52,7 @@ function isRepeatableSocket(socketName) {
 function getSocketName(s) { return typeof s === "string" ? s : s.name; }
 function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
 
-function buildWallMesh(wall) {
+function buildWallMesh(wall, allWalls = []) {
   // Column
   if (wall.type === "column") {
     const group = new THREE.Group();
@@ -72,25 +72,42 @@ function buildWallMesh(wall) {
     group.userData.isWall = true;
     return group;
   }
-  // Wall
+
+  // Wall — compute miter extension at each endpoint
+  const t = wall.thickness || 0.1;
+  const snapDist = t * 1.5;
+  const otherWalls = allWalls.filter(w => w.uid !== wall.uid && w.type !== 'column');
+
+  const ptConnects = (px, pz) => otherWalls.some(w =>
+    Math.hypot(w.x1-px, w.z1-pz) < snapDist || Math.hypot(w.x2-px, w.z2-pz) < snapDist
+  );
+
+  const extStart = ptConnects(wall.x1, wall.z1) ? t / 2 : 0;
+  const extEnd = ptConnects(wall.x2, wall.z2) ? t / 2 : 0;
+
   const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
   const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
+  const extLen = len + extStart + extEnd;
   const angle = Math.atan2(dx, dz) - Math.PI / 2;
   const h = wall.height, gr = Math.min(Math.max(wall.glassRatio, 0), 1);
   const solidH = h * (1 - gr), glassH = h * gr;
-  const t = wall.thickness;
+
+  // offset center by miter asymmetry
+  const dirX = dx / len, dirZ = dz / len;
+  const cx = (wall.x1 + wall.x2) / 2 + dirX * (extEnd - extStart) / 2;
+  const cz = (wall.z1 + wall.z2) / 2 + dirZ * (extEnd - extStart) / 2;
+
   const group = new THREE.Group();
-  group.position.set((wall.x1 + wall.x2) / 2, 0, (wall.z1 + wall.z2) / 2);
+  group.position.set(cx, 0, cz);
   group.rotation.y = angle;
-  // solid part
+
   if (solidH > 0.001) {
     const solidMat = new THREE.MeshStandardMaterial({ color: wall.color || "#cccccc", roughness: 0.8, metalness: 0.05 });
-    const solid = new THREE.Mesh(new THREE.BoxGeometry(len, solidH, t), solidMat);
+    const solid = new THREE.Mesh(new THREE.BoxGeometry(extLen, solidH, t), solidMat);
     solid.position.y = solidH / 2;
     solid.castShadow = true; solid.receiveShadow = true;
     group.add(solid);
   }
-  // glass part
   if (glassH > 0.001) {
     const glassMat = new THREE.MeshPhysicalMaterial({
       color: 0xddeeff, transparent: true, opacity: 0.25,
@@ -98,7 +115,7 @@ function buildWallMesh(wall) {
       transmission: 0.88, thickness: t, ior: 1.5,
       side: THREE.DoubleSide,
     });
-    const glass = new THREE.Mesh(new THREE.BoxGeometry(len, glassH, t * 0.4), glassMat);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(extLen, glassH, t * 0.4), glassMat);
     glass.position.y = solidH + glassH / 2;
     group.add(glass);
   }
@@ -543,6 +560,7 @@ export default function BoothPlannerV2() {
   const [layoutMode, setLayoutMode] = useState(false);
   const layoutModeRef = useRef(false);
   useEffect(() => { layoutModeRef.current = layoutMode; }, [layoutMode]);
+  const [layout2dTool, setLayout2dTool] = useState("select"); // select | wall | column | door | model
   const setLayoutModeUIRef = useRef(null);
   useEffect(() => { setLayoutModeUIRef.current = setLayoutMode; }, []);
   const appSettingsRef = useRef(appSettings);
@@ -1953,7 +1971,7 @@ export default function BoothPlannerV2() {
       clearGhosts,
       addSpawnAnimation: (container) => { spawnAnimations.push({ container, startTime: performance.now() }); },
       measureGroup, measurePreviewLine, measurePreviewLabel, measureStartDot, makeMeasureLabel,
-      target, getRadiusThetaPhi: () => ({ radius, theta, phi }),
+      target, orthoCam, getRadiusThetaPhi: () => ({ radius, theta, phi }),
       setRadiusThetaPhi: (r, t, p) => { radius = r; theta = t; phi = p; updateCamera(); },
       focusOn: (x, y, z) => {
         const startTarget = target.clone();
@@ -2345,7 +2363,7 @@ export default function BoothPlannerV2() {
     walls.forEach((wall) => {
       let mesh = wallGroup.children.find((c) => c.userData.wallUid === wall.uid);
       if (mesh) wallGroup.remove(mesh);
-      mesh = buildWallMesh(wall);
+      mesh = buildWallMesh(wall, walls);
       mesh.userData.wallUid = wall.uid;
       // highlight selected wall or its group
       const selectedWall = walls.find((w) => w.uid === selectedWallUid);
@@ -2416,14 +2434,17 @@ export default function BoothPlannerV2() {
         if (!child.isMesh || !child.material) return;
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         mats.forEach((mat) => {
+          const isGlass = mat.transmission > 0; // skip glass materials
           if (layerLock.walls) {
             mat.transparent = true;
-            mat.opacity = 0.5;
+            mat.opacity = isGlass ? mat.opacity * 0.5 : 0.5;
             mat._lockedColorSaved = mat._lockedColorSaved || mat.color.clone();
             mat.color.lerp(new THREE.Color(0xf59e0b), 0.3);
           } else {
-            mat.opacity = 1;
-            mat.transparent = false;
+            if (!isGlass) {
+              mat.opacity = 1;
+              mat.transparent = false;
+            }
             if (mat._lockedColorSaved) {
               mat.color.copy(mat._lockedColorSaved);
               delete mat._lockedColorSaved;
@@ -4098,6 +4119,33 @@ export default function BoothPlannerV2() {
 
       {/* ===== CANVAS ===== */}
       <div ref={mountRef} onDragOver={(e) => e.preventDefault()} onDrop={handleDrop} style={{ flex: 1, minWidth: 0, position: "relative" }}>
+
+        {/* Layout 2D overlay */}
+        {layoutMode && (
+          <Layout2DOverlay
+            mountRef={mountRef}
+            threeRef={threeRef}
+            items={items}
+            walls={walls}
+            catalog={catalog}
+            floorW={floorW}
+            floorD={floorD}
+            floorPlan={floorPlan}
+            selectedUids={selectedUids}
+            selectedWallUid={selectedWallUid}
+            activeTool={layout2dTool}
+            setActiveTool={setLayout2dTool}
+            onMoveItems={(patches) => setItems((prev) => prev.map((it) => { const p = patches[it.uid]; return p ? { ...it, ...p } : it; }))}
+            onMoveWall={(uid, patch) => setWalls((prev) => prev.map((w) => w.uid === uid ? { ...w, ...patch } : w))}
+            onSelectUids={(uids) => { setSelectedUids(uids); setSelectedWallUid(null); }}
+            onSelectWall={(uid) => { setSelectedWallUid(uid); setSelectedUids([]); }}
+            onAddWall={(wall) => setWalls((prev) => [...prev, wall])}
+            unit={unit}
+            UNITS={UNITS}
+            fmt={fmt}
+            metersTo={metersTo}
+          />
+        )}
         {/* Loading overlay */}
         {!libraryReady && (
           <div style={{ position: "absolute", inset: 0, zIndex: 50, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, background: "rgba(13,15,24,0.9)", backdropFilter: "blur(4px)" }}>
@@ -4439,32 +4487,35 @@ export default function BoothPlannerV2() {
           );
           return (
             <>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
-                <div style={{ width: 3, height: 20, background: "#5b4bff", borderRadius: 2 }} />
-                <h3 style={{ fontSize: 14, fontWeight: 700, margin: 0, color: "#e2e8f0" }}>Wall Properties</h3>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 3, height: 20, background: "#5b4bff", borderRadius: 2 }} />
+                  <h3 style={{ fontSize: 14, fontWeight: 700, margin: 0, color: "#e2e8f0" }}>Wall Properties</h3>
+                </div>
+                {selWall.groupId && <span style={{ fontSize: 9, color: "#5b4bff", fontWeight: 700, background: "#5b4bff22", borderRadius: 4, padding: "2px 6px" }}>GROUP</span>}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
                 <div>
                   <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Height ({UNITS[unit].label})</label>
                   <input type="number" min="0.1" step="0.1" value={fmt(metersTo(selWall.height, unit))}
-                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, height: toMeters(parseFloat(e.target.value) || 0, unit) } : w))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => (w.uid === selectedWallUid || (selWall.groupId && w.groupId === selWall.groupId)) ? { ...w, height: toMeters(parseFloat(e.target.value) || 0, unit) } : w))}
                     style={inputStyle} />
                 </div>
                 <div>
                   <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Thickness ({UNITS[unit].label})</label>
                   <input type="number" min="0.02" step="0.02" value={fmt(metersTo(selWall.thickness || 0.1, unit))}
-                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, thickness: toMeters(parseFloat(e.target.value) || 0.1, unit) } : w))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => (w.uid === selectedWallUid || (selWall.groupId && w.groupId === selWall.groupId)) ? { ...w, thickness: toMeters(parseFloat(e.target.value) || 0.1, unit) } : w))}
                     style={inputStyle} />
                 </div>
               </div>
               <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Glass — {Math.round(selWall.glassRatio * 100)}%</label>
               <input type="range" min="0" max="1" step="0.05" value={selWall.glassRatio}
-                onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, glassRatio: parseFloat(e.target.value) } : w))}
+                onChange={(e) => setWalls((prev) => prev.map((w) => (w.uid === selectedWallUid || (selWall.groupId && w.groupId === selWall.groupId)) ? { ...w, glassRatio: parseFloat(e.target.value) } : w))}
                 style={{ width: "100%", accentColor: "#5b4bff", marginBottom: 12 }} />
               <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Color</label>
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
                 <input type="color" value={selWall.color}
-                  onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, color: e.target.value } : w))}
+                  onChange={(e) => setWalls((prev) => prev.map((w) => (w.uid === selectedWallUid || (selWall.groupId && w.groupId === selWall.groupId)) ? { ...w, color: e.target.value } : w))}
                   style={{ width: 36, height: 36, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
                 <div style={{ flex: 1, height: 36, background: selWall.color, borderRadius: 8, border: "1px solid #1e2035" }} />
               </div>
@@ -5028,53 +5079,64 @@ function ModelDragArea({ def, kind, libraryReady, thumb, color, onDragStart }) {
 }
 
 // ===================== Island Builder =====================
+// palette colors for models added to the brush palette
+const PALETTE_COLORS = ["#5b4bff","#00e5ff","#f59e0b","#4ade80","#f87171","#a855f7","#fb923c","#34d399"];
+
 function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, metersTo, onPlace, onCancel }) {
-  const [selectedModelId, setSelectedModelId] = React.useState(catalog[0]?.id || null);
   const [cols, setCols] = React.useState(4);
   const [rows, setRows] = React.useState(4);
   const [cells, setCells] = React.useState({});
-  const [realDims, setRealDims] = React.useState(null); // { w, d } from actual GLB
-  const [loadingDims, setLoadingDims] = React.useState(false);
+  const [rowOffsets, setRowOffsets] = React.useState({});
+  const [colOffsets, setColOffsets] = React.useState({});
 
-  const selectedDef = catalog.find((c) => c.id === selectedModelId);
+  // palette: [{ id, def, color, dims }]
+  const [palette, setPalette] = React.useState([]);
+  const [activeBrushId, setActiveBrushId] = React.useState(null);
+  const [showCatalogPicker, setShowCatalogPicker] = React.useState(false);
+  const [loadingDims, setLoadingDims] = React.useState({});
 
-  // load real GLB dims when model changes
-  React.useEffect(() => {
-    if (!selectedDef?.file) { setRealDims(null); return; }
-    setLoadingDims(true);
-    measureModelDims(selectedDef.file)
-      .then((dims) => { setRealDims({ w: dims.w, d: dims.d }); })
-      .catch(() => setRealDims(null))
-      .finally(() => setLoadingDims(false));
-  }, [selectedModelId]);
+  const activeBrush = palette.find((p) => p.id === activeBrushId);
 
-  // use real dims if available, fallback to manifest
-  const modelW = realDims?.w || selectedDef?.w || 1;
-  const modelD = realDims?.d || selectedDef?.d || 1;
+  // add model to palette
+  const addToPalette = (def) => {
+    if (palette.find((p) => p.id === def.id)) {
+      setActiveBrushId(def.id);
+      setShowCatalogPicker(false);
+      return;
+    }
+    const color = PALETTE_COLORS[palette.length % PALETTE_COLORS.length];
+    const newEntry = { id: def.id, def, color, dims: null };
+    setPalette((prev) => [...prev, newEntry]);
+    setActiveBrushId(def.id);
+    setShowCatalogPicker(false);
+    // load real dims
+    setLoadingDims((prev) => ({ ...prev, [def.id]: true }));
+    measureModelDims(def.file)
+      .then((d) => setPalette((prev) => prev.map((p) => p.id === def.id ? { ...p, dims: { w: d.w, d: d.d } } : p)))
+      .catch(() => {})
+      .finally(() => setLoadingDims((prev) => ({ ...prev, [def.id]: false })));
+  };
+
+  const getDims = (modelId) => {
+    const entry = palette.find((p) => p.id === modelId);
+    const def = entry?.def;
+    return { w: entry?.dims?.w || def?.w || 1, d: entry?.dims?.d || def?.d || 1 };
+  };
 
   const CELL_PX = 56;
-  const ARROW_DIRS = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+  const ARROW_DIRS = [0, -Math.PI / 2, Math.PI, Math.PI / 2]; // N, E, S, W
 
-  // auto-rotate: face away from most neighbours
   const autoRotate = (r, c, activeCells) => {
-    const neighbours = [
-      [r - 1, c, 0],       // north neighbour → face south (Math.PI)
-      [r, c + 1, -Math.PI/2], // east → face west
-      [r + 1, c, 0],       // south → face north (0)
-      [r, c - 1, Math.PI/2],  // west → face east
-    ];
-    // find empty sides (exterior)
-    const empty = neighbours.filter(([nr, nc]) => !activeCells[`${nr},${nc}`]);
+    const neighbours = [[r-1,c],[r,c+1],[r+1,c],[r,c-1]];
+    const empty = neighbours.filter(([nr,nc]) => !activeCells[`${nr},${nc}`]);
     if (!empty.length) return 0;
-    // pick the facing direction of the first empty side
     const faceMap = {
-      [`${r-1},${c}`]: Math.PI,    // north empty → face south (away from north neighbor)
-      [`${r},${c+1}`]: -Math.PI/2, // east empty → face west
-      [`${r+1},${c}`]: 0,          // south empty → face north
-      [`${r},${c-1}`]: Math.PI/2,  // west empty → face east
+      [`${r-1},${c}`]: 0,           // north empty → face north
+      [`${r},${c+1}`]: -Math.PI/2,  // east empty → face east
+      [`${r+1},${c}`]: Math.PI,     // south empty → face south
+      [`${r},${c-1}`]: Math.PI/2,   // west empty → face west
     };
-    // find the exterior side with fewest neighbours of its own (outermost corner)
-    const best = empty.sort(([nr1, nc1], [nr2, nc2]) => {
+    const best = empty.sort(([nr1,nc1],[nr2,nc2]) => {
       const n1 = [[nr1-1,nc1],[nr1+1,nc1],[nr1,nc1-1],[nr1,nc1+1]].filter(([a,b])=>activeCells[`${a},${b}`]).length;
       const n2 = [[nr2-1,nc2],[nr2+1,nc2],[nr2,nc2-1],[nr2,nc2+1]].filter(([a,b])=>activeCells[`${a},${b}`]).length;
       return n1 - n2;
@@ -5082,489 +5144,377 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
     return faceMap[`${best[0]},${best[1]}`] ?? 0;
   };
 
-  const SNAP_DIRS = [null, 'n', 'e', 's', 'w']; // null = center
-  const snapIcon = { null: '·', n: '↑', e: '→', s: '↓', w: '←' };
-
-  const cycleSnap = (e, r, c) => {
-    e.stopPropagation();
-    setCells((prev) => {
-      const key = `${r},${c}`;
-      if (!prev[key]) return prev;
-      const cur = prev[key].snap ?? null;
-      const idx = SNAP_DIRS.indexOf(cur);
-      const next = SNAP_DIRS[(idx + 1) % SNAP_DIRS.length];
-      return { ...prev, [key]: { ...prev[key], snap: next } };
-    });
+  const cellSize = (rotY, modelId) => {
+    const { w, d } = getDims(modelId);
+    const is90 = Math.abs(Math.abs(rotY) - Math.PI / 2) < 0.01;
+    return is90 ? { x: d, z: w } : { x: w, z: d };
   };
-
-  const toggleCell = (r, c) => {
-    setCells((prev) => {
-      const key = `${r},${c}`;
-      const next = { ...prev };
-      if (next[key]?.active) {
-        delete next[key];
-      } else {
-        next[key] = { active: true, rotY: autoRotate(r, c, prev) };
-      }
-      return next;
-    });
-  };
-
-  const rotateCell = (e, r, c) => {
-    e.stopPropagation();
-    setCells((prev) => {
-      const key = `${r},${c}`;
-      if (!prev[key]) return prev;
-      const cur = prev[key].rotY || 0;
-      const idx = ARROW_DIRS.findIndex((d) => Math.abs(d - cur) < 0.01);
-      const next = ARROW_DIRS[(idx + 1) % ARROW_DIRS.length];
-      return { ...prev, [key]: { ...prev[key], rotY: next } };
-    });
-  };
-
-  // cell effective size based on rotation
-  const cellSize = (rotY) => {
-    const isRotated90 = Math.abs(Math.abs(rotY) - Math.PI / 2) < 0.01;
-    return isRotated90
-      ? { x: modelD, z: modelW }  // swapped when 90/270
-      : { x: modelW, z: modelD };
-  };
-
-  // row offsets: { rowIndex: offsetMultiplier } — 0, 0.5, 1
-  const [rowOffsets, setRowOffsets] = React.useState({});
-  const [colOffsets, setColOffsets] = React.useState({});
 
   const cycleOffset = (idx, map, setMap) => {
-    setMap((prev) => {
-      const cur = prev[idx] || 0;
-      const next = cur >= 1 ? 0 : cur + 0.5;
-      return { ...prev, [idx]: next };
-    });
+    setMap((prev) => { const cur = prev[idx] || 0; return { ...prev, [idx]: cur >= 1 ? 0 : cur + 0.5 }; });
   };
 
   const activeCells = Object.entries(cells).filter(([, v]) => v.active);
 
   const handlePlace = () => {
-    if (!selectedDef || !activeCells.length) return;
+    if (!activeCells.length || !activeBrush) return;
     const groupId = `island_${Date.now()}`;
-    const color = catalogColors[selectedDef.id] || selectedDef.color || "#888888";
 
-    // compute cumulative X positions per column based on max width in each col
+    // compute col widths and row depths per cell (each may have different model)
     const colWidths = {};
     for (let c = 0; c < cols; c++) {
       let maxW = 0;
       for (let r = 0; r < rows; r++) {
         const cell = cells[`${r},${c}`];
-        if (cell?.active) {
-          const sz = cellSize(cell.rotY);
-          maxW = Math.max(maxW, sz.x);
-        }
+        if (cell?.active && !cell.isIntersection) { const sz = cellSize(cell.rotY, cell.modelId); maxW = Math.max(maxW, sz.x); }
       }
-      colWidths[c] = maxW; // 0 if no active cells in this column
+      colWidths[c] = maxW;
     }
-
-    // compute cumulative Z positions per row
     const rowDepths = {};
     for (let r = 0; r < rows; r++) {
       let maxD = 0;
       for (let c = 0; c < cols; c++) {
         const cell = cells[`${r},${c}`];
-        if (cell?.active) {
-          const sz = cellSize(cell.rotY);
-          maxD = Math.max(maxD, sz.z);
-        }
+        if (cell?.active && !cell.isIntersection) { const sz = cellSize(cell.rotY, cell.modelId); maxD = Math.max(maxD, sz.z); }
       }
-      rowDepths[r] = maxD; // 0 if no active cells in this row
+      rowDepths[r] = maxD;
     }
+    const colX = {}; let accX = 0;
+    for (let c = 0; c < cols; c++) { colX[c] = accX + colWidths[c] / 2; accX += colWidths[c]; }
+    const rowZ = {}; let accZ = 0;
+    for (let r = 0; r < rows; r++) { rowZ[r] = accZ + rowDepths[r] / 2; accZ += rowDepths[r]; }
+    const cx = accX / 2, cz = accZ / 2;
 
-    // cumulative positions
-    const colX = {};
-    let accX = 0;
-    for (let c = 0; c < cols; c++) {
-      colX[c] = accX + colWidths[c] / 2;
-      accX += colWidths[c];
-    }
-    const rowZ = {};
-    let accZ = 0;
-    for (let r = 0; r < rows; r++) {
-      rowZ[r] = accZ + rowDepths[r] / 2;
-      accZ += rowDepths[r];
-    }
-
-    // build items — regular cells + intersection points
     const newItems = activeCells.map(([key, cell], idx) => {
+      const modelId = cell.modelId || activeBrushId;
+      const def = palette.find((p) => p.id === modelId)?.def;
+      if (!def) return null;
+      const { d: mD } = getDims(modelId);
+      const color = catalogColors[modelId] || def.color || "#888888";
       let wx, wz;
       if (cell.isIntersection) {
-        // intersection point: ri,ci in the interleaved grid
         const { ri, ci } = cell;
-        const r = (ri - 1) / 2;
-        const c = (ci - 1) / 2;
-        const isInterRow = ri % 2 === 1;
-        const isInterCol = ci % 2 === 1;
+        const r = (ri - 1) / 2; const c2 = (ci - 1) / 2;
+        const isInterRow = ri % 2 === 1; const isInterCol = ci % 2 === 1;
         if (isInterCol) {
-          const x1 = colX[c] !== undefined ? colX[c] + (colWidths[c] || 0) / 2 : 0;
-          const x2 = colX[c+1] !== undefined ? colX[c+1] - (colWidths[c+1] || 0) / 2 : x1;
-          wx = (x1 + x2) / 2;
-        } else {
-          wx = colX[Math.floor(ci / 2)] || 0;
-        }
+          const x1 = colX[c2] !== undefined ? colX[c2] + (colWidths[c2]||0)/2 : 0;
+          const x2 = colX[c2+1] !== undefined ? colX[c2+1] - (colWidths[c2+1]||0)/2 : x1;
+          wx = (x1+x2)/2;
+        } else { wx = colX[Math.floor(ci/2)] || 0; }
         if (isInterRow) {
-          const z1 = rowZ[r] !== undefined ? rowZ[r] + (rowDepths[r] || 0) / 2 : 0;
-          const z2 = rowZ[r+1] !== undefined ? rowZ[r+1] - (rowDepths[r+1] || 0) / 2 : z1;
-          wz = (z1 + z2) / 2;
-        } else {
-          wz = rowZ[Math.floor(ri / 2)] || 0;
-        }
-        // offset by half depth so the object edge sits on the boundary, not its center
+          const z1 = rowZ[r] !== undefined ? rowZ[r] + (rowDepths[r]||0)/2 : 0;
+          const z2 = rowZ[r+1] !== undefined ? rowZ[r+1] - (rowDepths[r+1]||0)/2 : z1;
+          wz = (z1+z2)/2;
+        } else { wz = rowZ[Math.floor(ri/2)] || 0; }
         const threeRotY = cell.rotY + Math.PI;
-        wx += Math.sin(threeRotY) * (modelD / 2);
-        wz += Math.cos(threeRotY) * (modelD / 2);
+        wx += Math.sin(threeRotY) * (mD/2);
+        wz += Math.cos(threeRotY) * (mD/2);
       } else {
         const [row, col] = key.split(",").map(Number);
-        const sz = cellSize(cell.rotY);
-        const xOffset = (colOffsets[col] || 0) * (rowDepths[row] || modelD);
-        const zOffset = (rowOffsets[row] || 0) * (colWidths[col] || modelW);
+        const sz = cellSize(cell.rotY, modelId);
+        const xOff = (colOffsets[col]||0) * (rowDepths[row]||mD);
+        const zOff = (rowOffsets[row]||0) * (colWidths[col]||sz.x);
         const snap = cell.snap ?? null;
-        const cellW = colWidths[col] || sz.x;
-        const cellD = rowDepths[row] || sz.z;
-        const snapX = snap === 'w' ? -(cellW - sz.x) / 2 : snap === 'e' ? (cellW - sz.x) / 2 : 0;
-        const snapZ = snap === 'n' ? -(cellD - sz.z) / 2 : snap === 's' ? (cellD - sz.z) / 2 : 0;
-        wx = colX[col] + xOffset + snapX;
-        wz = rowZ[row] + zOffset + snapZ;
+        const cellW = colWidths[col]||sz.x; const cellD = rowDepths[row]||sz.z;
+        const snapX = snap==='w'?-(cellW-sz.x)/2:snap==='e'?(cellW-sz.x)/2:0;
+        const snapZ = snap==='n'?-(cellD-sz.z)/2:snap==='s'?(cellD-sz.z)/2:0;
+        wx = colX[col] + xOff + snapX;
+        wz = rowZ[row] + zOff + snapZ;
       }
       return {
-        uid: `${selectedDef.id}_island_${Date.now()}_${idx}`,
-        catalogId: selectedDef.id,
-        kind: "model",
-        x: wx,
-        z: wz,
+        uid: `${modelId}_island_${Date.now()}_${idx}`,
+        catalogId: modelId, kind: "model",
+        x: wx - cx, z: wz - cz,
         rotY: cell.rotY + Math.PI,
-        color: varyColor(color, idx),
-        sockets: {},
-        groupIds: [groupId],
-        pivotX: accX / 2,
-        pivotZ: accZ / 2,
+        color, sockets: {}, groupIds: [groupId], pivotX: 0, pivotZ: 0,
       };
-    });
+    }).filter(Boolean);
 
-    // center on origin
-    const cx = accX / 2;
-    const cz = accZ / 2;
-    const centered = newItems.map((it) => ({
-      ...it,
-      x: it.x - cx,
-      z: it.z - cz,
-      pivotX: 0,
-      pivotZ: 0,
-    }));
-
-    onPlace(centered);
+    onPlace(newItems);
   };
 
-  // Arrow SVG for cell direction indicator
-  const ArrowSvg = ({ rotY, size = 18 }) => {
-    const deg = -(rotY * 180 / Math.PI); // negate to match 3D: rotY=0 faces +Z = down in grid
-    return (
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#00e5ff" strokeWidth="2.5"
-        style={{ transform: `rotate(${deg}deg)`, pointerEvents: "none" }}>
-        <line x1="12" y1="19" x2="12" y2="5"/>
-        <polyline points="5 12 12 5 19 12"/>
-      </svg>
-    );
-  };
+  const ArrowSvg = ({ rotY, size = 18 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#00e5ff" strokeWidth="2.5"
+      style={{ transform: `rotate(${-(rotY*180/Math.PI)}deg)`, pointerEvents: "none" }}>
+      <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
+    </svg>
+  );
+
+  // catalog picker — grouped by category
+  const categories = [...new Set(catalog.filter(c => c.category !== "Props").map(c => c.category || "Models"))];
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 2000, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center" }}
-      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div style={{ background: "#0d1117", border: "1px solid #1e2035", borderRadius: 16, padding: 28, width: "min(96vw, 680px)", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 20 }}>
+    <div style={{ position:"fixed", inset:0, zIndex:2000, background:"rgba(0,0,0,0.8)", display:"flex", alignItems:"center", justifyContent:"center" }}
+      onClick={(e) => { if (e.target===e.currentTarget) onCancel(); }}>
+      <div style={{ background:"#0d1117", border:"1px solid #1e2035", borderRadius:16, padding:28, width:"min(96vw,700px)", maxHeight:"90vh", overflowY:"auto", display:"flex", flexDirection:"column", gap:18 }}>
 
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 3, height: 22, background: "#5b4bff", borderRadius: 2 }} />
-            <h2 style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0", margin: 0 }}>Island Builder</h2>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <div style={{ width:3, height:22, background:"#5b4bff", borderRadius:2 }}/>
+            <h2 style={{ fontSize:16, fontWeight:700, color:"#e2e8f0", margin:0 }}>Island Builder</h2>
           </div>
-          <button onClick={onCancel} style={{ background: "none", border: "none", color: "#64748b", fontSize: 20, cursor: "pointer", lineHeight: 1 }}>×</button>
+          <button onClick={onCancel} style={{ background:"none", border:"none", color:"#64748b", fontSize:20, cursor:"pointer" }}>×</button>
         </div>
 
-        {/* Model selector */}
+        {/* Palette */}
         <div>
-          <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Model</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {catalog.map((c) => (
-              <button key={c.id} onClick={() => setSelectedModelId(c.id)}
-                style={{ padding: "6px 12px", borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: "pointer", border: `1px solid ${selectedModelId === c.id ? "#5b4bff" : "#1e2035"}`, background: selectedModelId === c.id ? "#5b4bff" : "#13162a", color: selectedModelId === c.id ? "#fff" : "#94a3b8" }}>
-                {c.name}
+          <div style={{ fontSize:10, fontWeight:700, color:"#64748b", letterSpacing:"0.07em", textTransform:"uppercase", marginBottom:8 }}>Model Palette</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+            {palette.map((p) => (
+              <button key={p.id} onClick={() => setActiveBrushId(p.id)}
+                style={{ display:"flex", alignItems:"center", gap:6, padding:"6px 10px", borderRadius:8, cursor:"pointer", border:`2px solid ${activeBrushId===p.id ? p.color : "transparent"}`, background: activeBrushId===p.id ? `${p.color}22` : "#13162a" }}>
+                <div style={{ width:10, height:10, borderRadius:"50%", background:p.color, flexShrink:0 }}/>
+                <span style={{ fontSize:11, fontWeight:600, color:"#e2e8f0" }}>{p.def.name}</span>
+                {loadingDims[p.id] && <span style={{ fontSize:9, color:"#64748b" }}>…</span>}
+                <button onClick={(e) => { e.stopPropagation(); setPalette((prev) => prev.filter((x) => x.id !== p.id)); if (activeBrushId===p.id) setActiveBrushId(palette.find(x=>x.id!==p.id)?.id||null); setCells((prev) => { const next={...prev}; Object.keys(next).forEach(k=>{ if(next[k].modelId===p.id) delete next[k]; }); return next; }); }}
+                  style={{ background:"none", border:"none", color:"#475569", cursor:"pointer", fontSize:12, padding:0, marginLeft:2, lineHeight:1 }}>×</button>
               </button>
             ))}
+            <button onClick={() => setShowCatalogPicker(true)}
+              style={{ display:"flex", alignItems:"center", gap:4, padding:"6px 10px", borderRadius:8, cursor:"pointer", border:"1px dashed #2a3060", background:"transparent", color:"#5b4bff", fontSize:11, fontWeight:700 }}>
+              + Add Model
+            </button>
           </div>
-          {selectedDef && (
-            <div style={{ fontSize: 10, color: "#475569", marginTop: 6 }}>
-              {loadingDims
-                ? <span style={{ color: "#5b4bff" }}>Measuring model…</span>
-                : <>{fmt(metersTo(modelW, unit))}{UNITS[unit].label} × {fmt(metersTo(modelD, unit))}{UNITS[unit].label} × {fmt(metersTo(selectedDef.h, unit))}{UNITS[unit].label}{realDims ? " (actual)" : " (manifest)"}</>
-              }
-            </div>
+          {palette.length === 0 && (
+            <div style={{ fontSize:11, color:"#475569", marginTop:6 }}>Add at least one model to start painting.</div>
           )}
         </div>
 
-        {/* Grid size controls */}
-        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase" }}>Grid size</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 11, color: "#94a3b8" }}>Cols</span>
-            <button onClick={() => { setCols((c) => Math.max(1, c - 1)); setCells({}); setColOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>−</button>
-            <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", minWidth: 20, textAlign: "center" }}>{cols}</span>
-            <button onClick={() => { setCols((c) => Math.min(8, c + 1)); setCells({}); setColOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>+</button>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 11, color: "#94a3b8" }}>Rows</span>
-            <button onClick={() => { setRows((r) => Math.max(1, r - 1)); setCells({}); setRowOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>−</button>
-            <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", minWidth: 20, textAlign: "center" }}>{rows}</span>
-            <button onClick={() => { setRows((r) => Math.min(8, r + 1)); setCells({}); setRowOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>+</button>
-          </div>
-          <button onClick={() => { setCells({}); setRowOffsets({}); setColOffsets({}); }} style={{ marginLeft: "auto", fontSize: 10, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontWeight: 600 }}>Clear</button>
-        </div>
-
-        {/* Grid */}
-        <div style={{ alignSelf: "center", overflowX: "auto" }}>
-          {/* Col offset buttons */}
-          <div style={{ display: "flex", gap: 3, marginBottom: 3, marginLeft: 26 }}>
-            {Array.from({ length: cols }, (_, c) => {
-              const off = colOffsets[c] || 0;
+        {/* Catalog picker */}
+        {showCatalogPicker && (
+          <div style={{ background:"#0a0c14", border:"1px solid #1e2035", borderRadius:12, padding:16, maxHeight:280, overflowY:"auto" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <span style={{ fontSize:11, fontWeight:700, color:"#94a3b8" }}>Select Model</span>
+              <button onClick={() => setShowCatalogPicker(false)} style={{ background:"none", border:"none", color:"#64748b", cursor:"pointer", fontSize:16 }}>×</button>
+            </div>
+            {categories.map((cat) => {
+              const catModels = catalog.filter((c) => (c.category||"Models")===cat && c.category!=="Props");
               return (
-                <div key={c} style={{ width: CELL_PX, display: "flex", justifyContent: "center" }}>
-                  <button onClick={() => cycleOffset(c, colOffsets, setColOffsets)}
-                    title="Cycle column offset: 0 → ½ → 1"
-                    style={{ fontSize: 9, fontWeight: 700, background: off ? "#2a1f5a" : "#13162a", border: `1px solid ${off ? "#5b4bff" : "#1e2035"}`, borderRadius: 4, color: off ? "#a5b4fc" : "#334155", cursor: "pointer", padding: "2px 5px", minWidth: 22 }}>
-                    {off === 0 ? "·" : off === 0.5 ? "½" : "1"}
-                  </button>
+                <div key={cat} style={{ marginBottom:12 }}>
+                  <div style={{ fontSize:9, fontWeight:700, color:"#475569", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:6 }}>{cat}</div>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                    {catModels.map((m) => {
+                      const inPalette = palette.find((p) => p.id === m.id);
+                      return (
+                        <button key={m.id} onClick={() => addToPalette(m)}
+                          style={{ padding:"5px 10px", borderRadius:7, fontSize:11, fontWeight:600, cursor:"pointer", border:`1px solid ${inPalette ? inPalette.color : "#1e2035"}`, background: inPalette ? `${inPalette.color}22` : "#13162a", color: inPalette ? "#e2e8f0" : "#94a3b8" }}>
+                          {m.name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               );
             })}
           </div>
+        )}
 
-          <div style={{ display: "flex", gap: 3 }}>
-            {/* Row offset buttons */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              {Array.from({ length: rows }, (_, r) => {
-                const off = rowOffsets[r] || 0;
+        {/* Grid size */}
+        <div style={{ display:"flex", gap:16, alignItems:"center" }}>
+          <div style={{ fontSize:10, fontWeight:700, color:"#64748b", letterSpacing:"0.07em", textTransform:"uppercase" }}>Grid</div>
+          {[["Cols", cols, setCols, setColOffsets], ["Rows", rows, setRows, setRowOffsets]].map(([label, val, setVal, setOff]) => (
+            <div key={label} style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <span style={{ fontSize:11, color:"#94a3b8" }}>{label}</span>
+              <button onClick={() => { setVal((v) => Math.max(1,v-1)); setCells({}); setOff({}); }} style={{ width:22, height:22, borderRadius:5, background:"#1e2035", border:"1px solid #2a2f4a", color:"#e2e8f0", cursor:"pointer", fontSize:13 }}>−</button>
+              <span style={{ fontSize:13, fontWeight:600, color:"#e2e8f0", minWidth:20, textAlign:"center" }}>{val}</span>
+              <button onClick={() => { setVal((v) => Math.min(8,v+1)); setCells({}); setOff({}); }} style={{ width:22, height:22, borderRadius:5, background:"#1e2035", border:"1px solid #2a2f4a", color:"#e2e8f0", cursor:"pointer", fontSize:13 }}>+</button>
+            </div>
+          ))}
+          <button onClick={() => { setCells({}); setRowOffsets({}); setColOffsets({}); }} style={{ marginLeft:"auto", fontSize:10, color:"#f87171", background:"none", border:"none", cursor:"pointer", fontWeight:600 }}>Clear</button>
+        </div>
+
+        {/* Grid */}
+        {palette.length > 0 && (
+          <div style={{ alignSelf:"center", overflowX:"auto" }}>
+            {/* Col offsets */}
+            <div style={{ display:"flex", gap:3, marginBottom:3, marginLeft:26 }}>
+              {Array.from({length:cols},(_,c) => {
+                const off = colOffsets[c]||0;
                 return (
-                  <div key={r} style={{ height: CELL_PX, display: "flex", alignItems: "center" }}>
-                    <button onClick={() => cycleOffset(r, rowOffsets, setRowOffsets)}
-                      title="Cycle row offset: 0 → ½ → 1"
-                      style={{ fontSize: 9, fontWeight: 700, background: off ? "#2a1f5a" : "#13162a", border: `1px solid ${off ? "#5b4bff" : "#1e2035"}`, borderRadius: 4, color: off ? "#a5b4fc" : "#334155", cursor: "pointer", padding: "2px 4px", minWidth: 18 }}>
-                      {off === 0 ? "·" : off === 0.5 ? "½" : "1"}
+                  <div key={c} style={{ width:CELL_PX, display:"flex", justifyContent:"center" }}>
+                    <button onClick={() => cycleOffset(c, colOffsets, setColOffsets)}
+                      style={{ fontSize:9, fontWeight:700, background:off?"#2a1f5a":"#13162a", border:`1px solid ${off?"#5b4bff":"#1e2035"}`, borderRadius:4, color:off?"#a5b4fc":"#334155", cursor:"pointer", padding:"2px 5px", minWidth:22 }}>
+                      {off===0?"·":off===0.5?"½":"1"}
                     </button>
                   </div>
                 );
               })}
             </div>
+            <div style={{ display:"flex", gap:3 }}>
+              {/* Row offsets */}
+              <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+                {Array.from({length:rows*2-1},(_,ri) => {
+                  if (ri%2===1) return <div key={ri} style={{ height:14 }}/>;
+                  const r = ri/2; const off = rowOffsets[r]||0;
+                  return (
+                    <div key={ri} style={{ height:CELL_PX, display:"flex", alignItems:"center" }}>
+                      <button onClick={() => cycleOffset(r, rowOffsets, setRowOffsets)}
+                        style={{ fontSize:9, fontWeight:700, background:off?"#2a1f5a":"#13162a", border:`1px solid ${off?"#5b4bff":"#1e2035"}`, borderRadius:4, color:off?"#a5b4fc":"#334155", cursor:"pointer", padding:"2px 4px", minWidth:18 }}>
+                        {off===0?"·":off===0.5?"½":"1"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
 
-            {/* Cells + intersection points */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              {Array.from({ length: rows * 2 - 1 }, (_, ri) => {
-                const isInterRow = ri % 2 === 1; // odd = between rows
-                const r = Math.floor(ri / 2);
-                return (
-                  <div key={ri} style={{ display: "flex", gap: 3, alignItems: "center" }}>
-                    {Array.from({ length: cols * 2 - 1 }, (_, ci) => {
-                      const isInterCol = ci % 2 === 1; // odd = between cols
-                      const c = Math.floor(ci / 2);
+              {/* Cells + intersections */}
+              <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+                {Array.from({length:rows*2-1},(_,ri) => {
+                  const isInterRow = ri%2===1;
+                  const r = Math.floor(ri/2);
+                  return (
+                    <div key={ri} style={{ display:"flex", gap:3, alignItems:"center" }}>
+                      {Array.from({length:cols*2-1},(_,ci) => {
+                        const isInterCol = ci%2===1;
+                        const c = Math.floor(ci/2);
 
-                      // intersection point
-                      if (isInterRow || isInterCol) {
-                        const ikey = `i_${ri}_${ci}`;
-                        const iactive = cells[ikey]?.active;
-                        const irotY = cells[ikey]?.rotY || 0;
-                        const size = isInterRow && isInterCol ? 10 : 14;
+                        if (isInterRow || isInterCol) {
+                          const ikey = `i_${ri}_${ci}`;
+                          const iactive = cells[ikey]?.active;
+                          const irotY = cells[ikey]?.rotY||0;
+                          const imodelId = cells[ikey]?.modelId;
+                          const icolor = palette.find(p=>p.id===imodelId)?.color||"#5b4bff";
+                          if (isInterRow && isInterCol) return <div key={ci} style={{ width:14, height:14 }}/>;
+                          return (
+                            <div key={ci} style={{ width:isInterCol?14:CELL_PX, height:isInterRow?14:CELL_PX, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                              <button
+                                onClick={() => {
+                                  if (!activeBrush) return;
+                                  setCells((prev) => {
+                                    const existing = prev[ikey];
+                                    if (existing?.active) {
+                                      const cur = existing.rotY||0;
+                                      const idx = ARROW_DIRS.findIndex(d=>Math.abs(d-cur)<0.01);
+                                      return {...prev,[ikey]:{...existing,rotY:ARROW_DIRS[(idx+1)%ARROW_DIRS.length]}};
+                                    }
+                                    return {...prev,[ikey]:{active:true,rotY:0,snap:null,isIntersection:true,ri,ci,modelId:activeBrushId}};
+                                  });
+                                }}
+                                onContextMenu={(e)=>{e.preventDefault();setCells((prev)=>{const ex=prev[ikey];if(!ex?.active)return prev;return{...prev,[ikey]:{...ex,active:false}};});}}
+                                style={{ width:14, height:14, borderRadius:"50%", padding:0, cursor:activeBrush?"pointer":"default", background:iactive?icolor:"#1e2035", border:`2px solid ${iactive?icolor:"#2a3060"}` }}>
+                                {iactive && <div style={{ display:"flex", alignItems:"center", justifyContent:"center" }}><ArrowSvg rotY={irotY} size={10}/></div>}
+                              </button>
+                            </div>
+                          );
+                        }
+
+                        // regular cell
+                        const key = `${r},${c}`;
+                        const cell = cells[key];
+                        const active = cell?.active;
+                        const rotY = cell?.rotY||0;
+                        const modelId = cell?.modelId;
+                        const brushColor = palette.find(p=>p.id===modelId)?.color||"#5b4bff";
                         return (
                           <div key={ci}
-                            style={{ width: isInterCol ? 14 : CELL_PX, height: isInterRow ? 14 : CELL_PX, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                            {(isInterRow && isInterCol) ? null : (
-                              <button onClick={() => setCells((prev) => {
-                                const existing = prev[ikey];
+                            onClick={() => {
+                              if (!activeBrush) return;
+                              setCells((prev) => {
+                                const existing = prev[key];
                                 if (existing?.active) {
-                                  // rotate if already active
-                                  const cur = existing.rotY || 0;
-                                  const idx = ARROW_DIRS.findIndex(d => Math.abs(d - cur) < 0.01);
-                                  return { ...prev, [ikey]: { ...existing, rotY: ARROW_DIRS[(idx + 1) % ARROW_DIRS.length] } };
+                                  if (existing.modelId === activeBrushId) {
+                                    // same brush = rotate
+                                    const cur = existing.rotY||0;
+                                    const idx = ARROW_DIRS.findIndex(d=>Math.abs(d-cur)<0.01);
+                                    return {...prev,[key]:{...existing,rotY:ARROW_DIRS[(idx+1)%ARROW_DIRS.length]}};
+                                  } else {
+                                    // different brush = repaint
+                                    return {...prev,[key]:{...existing,modelId:activeBrushId}};
+                                  }
                                 }
-                                return { ...prev, [ikey]: { active: true, rotY: 0, snap: null, isIntersection: true, ri, ci } };
-                              })}
-                              onContextMenu={(e) => { e.preventDefault(); setCells((prev) => { const existing = prev[ikey]; if (!existing?.active) return prev; return { ...prev, [ikey]: { ...existing, active: false } }; }); }}
-                                style={{
-                                  width: size, height: size, borderRadius: '50%', padding: 0, cursor: 'pointer',
-                                  background: iactive ? '#5b4bff' : '#1e2035',
-                                  border: `2px solid ${iactive ? '#7c6dff' : '#2a3060'}`,
-                                  position: 'relative', flexShrink: 0,
-                                }}>
-                                {iactive && (
-                                  <div style={{ position: 'absolute', inset: -20, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
-                                    <ArrowSvg rotY={irotY} size={12} />
-                                  </div>
-                                )}
-                              </button>
-                            )}
-                            {iactive && !isInterRow && !isInterCol && (
-                              <button onClick={(e) => { e.stopPropagation(); setCells((prev) => {
-                                const cur = prev[ikey]?.rotY || 0;
-                                const idx = ARROW_DIRS.indexOf(ARROW_DIRS.find(d => Math.abs(d - cur) < 0.01));
-                                return { ...prev, [ikey]: { ...prev[ikey], rotY: ARROW_DIRS[(idx + 1) % ARROW_DIRS.length] } };
-                              }); }}
-                                style={{ position: 'absolute', bottom: 1, right: 1, width: 10, height: 10, borderRadius: 2, background: '#5b4bff', border: 'none', color: '#fff', fontSize: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>↻</button>
+                                return {...prev,[key]:{active:true,rotY:autoRotate(r,c,prev),modelId:activeBrushId,snap:null}};
+                              });
+                            }}
+                            onContextMenu={(e)=>{e.preventDefault();setCells((prev)=>{const ex=prev[key];if(!ex?.active)return prev;return{...prev,[key]:{...ex,active:false}};});}}
+                            style={{
+                              width:CELL_PX, height:CELL_PX, borderRadius:8, cursor:activeBrush?"pointer":"default",
+                              background:active?`${brushColor}18`:"#13162a",
+                              border:`2px solid ${active?brushColor:"#1e2035"}`,
+                              display:"flex", alignItems:"center", justifyContent:"center",
+                              position:"relative", transition:"background 0.1s, border 0.1s", flexShrink:0,
+                            }}>
+                            {active && (
+                              <>
+                                <ArrowSvg rotY={rotY} size={22}/>
+                                {[['n',{top:2,left:'50%',transform:'translateX(-50%)'}],['s',{bottom:2,left:'50%',transform:'translateX(-50%)'}],['w',{left:2,top:'50%',transform:'translateY(-50%)'}],['e',{right:2,top:'50%',transform:'translateY(-50%)'}]].map(([dir,pos])=>(
+                                  <button key={dir} onClick={(e)=>{e.stopPropagation();setCells((prev)=>{const k=key;if(!prev[k])return prev;const cur=prev[k].snap;return{...prev,[k]:{...prev[k],snap:cur===dir?null:dir}};});}}
+                                    style={{position:'absolute',...pos,width:8,height:8,borderRadius:'50%',padding:0,background:cell?.snap===dir?'#00e5ff':'#1e2035',border:`1px solid ${cell?.snap===dir?'#00e5ff':'#2a3060'}`,cursor:'pointer'}}/>
+                                ))}
+                              </>
                             )}
                           </div>
                         );
-                      }
-
-                      // regular cell
-                      const key = `${r},${c}`;
-                      const cell = cells[key];
-                      const active = cell?.active;
-                      const rotY = cell?.rotY || 0;
-                      return (
-                        <div key={ci} onClick={() => {
-                          const key = `${r},${c}`;
-                          setCells((prev) => {
-                            const existing = prev[key];
-                            if (existing?.active) {
-                              const cur = existing.rotY || 0;
-                              const idx = ARROW_DIRS.findIndex(d => Math.abs(d - cur) < 0.01);
-                              return { ...prev, [key]: { ...existing, rotY: ARROW_DIRS[(idx + 1) % ARROW_DIRS.length] } };
-                            }
-                            return { ...prev, [key]: { active: true, rotY: autoRotate(r, c, prev) } };
-                          });
-                        }}
-                        onContextMenu={(e) => { e.preventDefault(); setCells((prev) => { const key = `${r},${c}`; if (!prev[key]?.active) return prev; return { ...prev, [key]: { ...prev[key], active: false } }; }); }}
-                          style={{
-                            width: CELL_PX, height: CELL_PX, borderRadius: 8, cursor: "pointer",
-                            background: active ? "#1a2a4a" : "#13162a",
-                            border: `2px solid ${active ? "#5b4bff" : "#1e2035"}`,
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                            position: "relative", transition: "background 0.1s, border 0.1s", flexShrink: 0,
-                          }}>
-                          {active && (
-                            <>
-                              <ArrowSvg rotY={rotY} size={22} />
-                              {[
-                                ['n', { top: 2, left: '50%', transform: 'translateX(-50%)' }],
-                                ['s', { bottom: 2, left: '50%', transform: 'translateX(-50%)' }],
-                                ['w', { left: 2, top: '50%', transform: 'translateY(-50%)' }],
-                                ['e', { right: 2, top: '50%', transform: 'translateY(-50%)' }],
-                              ].map(([dir, pos]) => (
-                                <button key={dir} onClick={(e) => { e.stopPropagation(); setCells((prev) => { const k = `${r},${c}`; if (!prev[k]) return prev; const cur = prev[k].snap; return { ...prev, [k]: { ...prev[k], snap: cur === dir ? null : dir } }; }); }}
-                                  style={{ position: 'absolute', ...pos, width: 8, height: 8, borderRadius: '50%', padding: 0, background: cell?.snap === dir ? '#00e5ff' : '#1e2035', border: `1px solid ${cell?.snap === dir ? '#00e5ff' : '#2a3060'}`, cursor: 'pointer' }} />
-                              ))}
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })}
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Legend */}
-        <div style={{ fontSize: 10, color: "#475569", textAlign: "center" }}>
-          Click = activate/rotate · Right-click = remove · edge dots = snap · points between cells = half position
-        </div>
+        {palette.length > 0 && (
+          <div style={{ fontSize:10, color:"#475569", textAlign:"center" }}>
+            Click = paint/rotate · Right-click = erase · Different brush on active cell = repaint · Edge dots = snap
+          </div>
+        )}
 
         {/* Preview */}
         {activeCells.length > 0 && (() => {
-          const PREV_W = 320, PREV_H = 180, PAD = 20;
-          const colWidths = {};
-          for (let c = 0; c < cols; c++) {
-            let maxW = 0;
-            for (let r = 0; r < rows; r++) {
-              const cell = cells[`${r},${c}`];
-              if (cell?.active) { const sz = cellSize(cell.rotY); maxW = Math.max(maxW, sz.x); }
+          const PREV_W=320, PREV_H=180, PAD=20;
+          const cW={}, rD={};
+          for (let c=0;c<cols;c++) { let mx=0; for(let r=0;r<rows;r++){const cell=cells[`${r},${c}`];if(cell?.active&&!cell.isIntersection){const sz=cellSize(cell.rotY,cell.modelId);mx=Math.max(mx,sz.x);}} cW[c]=mx; }
+          for (let r=0;r<rows;r++) { let mx=0; for(let c=0;c<cols;c++){const cell=cells[`${r},${c}`];if(cell?.active&&!cell.isIntersection){const sz=cellSize(cell.rotY,cell.modelId);mx=Math.max(mx,sz.z);}} rD[r]=mx; }
+          const cX={}; let aX=0; for(let c=0;c<cols;c++){cX[c]=aX+cW[c]/2;aX+=cW[c];}
+          const rZ={}; let aZ=0; for(let r=0;r<rows;r++){rZ[r]=aZ+rD[r]/2;aZ+=rD[r];}
+          const cx2=aX/2, cz2=aZ/2;
+          const rects = activeCells.map(([key,cell])=>{
+            const modelId=cell.modelId||activeBrushId;
+            const sz=cellSize(cell.rotY,modelId);
+            const color=palette.find(p=>p.id===modelId)?.color||"#5b4bff";
+            let wx,wz;
+            if(cell.isIntersection){
+              const{ri,ci}=cell;const r2=(ri-1)/2;const c2=(ci-1)/2;
+              const isIR=ri%2===1;const isIC=ci%2===1;
+              if(isIC){const x1=cX[c2]!==undefined?cX[c2]+(cW[c2]||0)/2:0;const x2=cX[c2+1]!==undefined?cX[c2+1]-(cW[c2+1]||0)/2:x1;wx=(x1+x2)/2;}else{wx=cX[Math.floor(ci/2)]||0;}
+              if(isIR){const z1=rZ[r2]!==undefined?rZ[r2]+(rD[r2]||0)/2:0;const z2=rZ[r2+1]!==undefined?rZ[r2+1]-(rD[r2+1]||0)/2:z1;wz=(z1+z2)/2;}else{wz=rZ[Math.floor(ri/2)]||0;}
+              const{d:mD}=getDims(modelId);
+              const tRY=cell.rotY+Math.PI;wx+=Math.sin(tRY)*(mD/2);wz+=Math.cos(tRY)*(mD/2);
+            }else{
+              const[row,col]=key.split(",").map(Number);
+              const cellW2=cW[col]||sz.x;const cellD2=rD[row]||sz.z;
+              const sX=cell.snap==='w'?-(cellW2-sz.x)/2:cell.snap==='e'?(cellW2-sz.x)/2:0;
+              const sZ=cell.snap==='n'?-(cellD2-sz.z)/2:cell.snap==='s'?(cellD2-sz.z)/2:0;
+              wx=cX[col]+sX;wz=rZ[row]+sZ;
             }
-            colWidths[c] = maxW;
-          }
-          const rowDepths = {};
-          for (let r = 0; r < rows; r++) {
-            let maxD = 0;
-            for (let c = 0; c < cols; c++) {
-              const cell = cells[`${r},${c}`];
-              if (cell?.active) { const sz = cellSize(cell.rotY); maxD = Math.max(maxD, sz.z); }
-            }
-            rowDepths[r] = maxD;
-          }
-          const colX = {}; let accX = 0;
-          for (let c = 0; c < cols; c++) { colX[c] = accX + colWidths[c] / 2; accX += colWidths[c]; }
-          const rowZ = {}; let accZ = 0;
-          for (let r = 0; r < rows; r++) { rowZ[r] = accZ + rowDepths[r] / 2; accZ += rowDepths[r]; }
-          const cx = accX / 2, cz = accZ / 2;
-
-          // centered rects (matching handlePlace output)
-          const rects = activeCells.map(([key, cell]) => {
-            let wx, wz;
-            if (cell.isIntersection) {
-              const { ri, ci } = cell;
-              const r = (ri - 1) / 2;
-              const c = (ci - 1) / 2;
-              const isInterRow = ri % 2 === 1;
-              const isInterCol = ci % 2 === 1;
-              if (isInterCol) {
-                const x1 = colX[c] !== undefined ? colX[c] + (colWidths[c] || 0) / 2 : 0;
-                const x2 = colX[c+1] !== undefined ? colX[c+1] - (colWidths[c+1] || 0) / 2 : x1;
-                wx = (x1 + x2) / 2;
-              } else { wx = colX[Math.floor(ci / 2)] || 0; }
-              if (isInterRow) {
-                const z1 = rowZ[r] !== undefined ? rowZ[r] + (rowDepths[r] || 0) / 2 : 0;
-                const z2 = rowZ[r+1] !== undefined ? rowZ[r+1] - (rowDepths[r+1] || 0) / 2 : z1;
-                wz = (z1 + z2) / 2;
-              } else { wz = rowZ[Math.floor(ri / 2)] || 0; }
-            } else {
-              const [row, col] = key.split(",").map(Number);
-              const sz = cellSize(cell.rotY);
-              const cellW = colWidths[col] || sz.x;
-              const cellD = rowDepths[row] || sz.z;
-              const snapX = cell.snap === 'w' ? -(cellW - sz.x) / 2 : cell.snap === 'e' ? (cellW - sz.x) / 2 : 0;
-              const snapZ = cell.snap === 'n' ? -(cellD - sz.z) / 2 : cell.snap === 's' ? (cellD - sz.z) / 2 : 0;
-              wx = colX[col] + snapX - cx;
-              wz = rowZ[row] + snapZ - cz;
-            }
-            const sz = cellSize(cell.rotY);
-            return { x: cell.isIntersection ? wx - cx : wx, z: cell.isIntersection ? wz - cz : wz, w: sz.x, d: sz.z, rotY: cell.rotY };
+            return{x:wx-cx2,z:wz-cz2,w:sz.x,d:sz.z,rotY:cell.rotY,color};
           });
-
-          // bounding box of centered rects
-          const xs1 = rects.map(r => r.x - r.w/2), xs2 = rects.map(r => r.x + r.w/2);
-          const zs1 = rects.map(r => r.z - r.d/2), zs2 = rects.map(r => r.z + r.d/2);
-          const minX = Math.min(...xs1), maxX = Math.max(...xs2);
-          const minZ = Math.min(...zs1), maxZ = Math.max(...zs2);
-          const spanX = (maxX - minX) || 1, spanZ = (maxZ - minZ) || 1;
-
-          // fit to preview with padding
-          const scale = Math.min((PREV_W - PAD * 2) / spanX, (PREV_H - PAD * 2) / spanZ);
-          const midX = (minX + maxX) / 2, midZ = (minZ + maxZ) / 2;
-          const toSx = (x) => PREV_W / 2 + (x - midX) * scale;
-          const toSz = (z) => PREV_H / 2 + (z - midZ) * scale;
-
-          return (
-            <div style={{ background: "#0d0f18", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ fontSize: 9, color: "#334155", padding: "6px 10px 0", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Preview</div>
-              <svg width={PREV_W} height={PREV_H} style={{ display: "block" }}>
+          const xs1=rects.map(r=>r.x-r.w/2),xs2=rects.map(r=>r.x+r.w/2);
+          const zs1=rects.map(r=>r.z-r.d/2),zs2=rects.map(r=>r.z+r.d/2);
+          const minX=Math.min(...xs1),maxX=Math.max(...xs2),minZ=Math.min(...zs1),maxZ=Math.max(...zs2);
+          const spanX=(maxX-minX)||1,spanZ=(maxZ-minZ)||1;
+          const scale=Math.min((PREV_W-PAD*2)/spanX,(PREV_H-PAD*2)/spanZ);
+          const midX=(minX+maxX)/2,midZ=(minZ+maxZ)/2;
+          const toSx=x=>PREV_W/2+(x-midX)*scale;
+          const toSz=z=>PREV_H/2+(z-midZ)*scale;
+          return(
+            <div style={{background:"#0d0f18",border:"1px solid #1e2035",borderRadius:10,overflow:"hidden"}}>
+              <div style={{fontSize:9,color:"#334155",padding:"6px 10px 0",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"}}>Preview</div>
+              <svg width={PREV_W} height={PREV_H} style={{display:"block"}}>
                 <defs><clipPath id="pc"><rect x="0" y="0" width={PREV_W} height={PREV_H}/></clipPath></defs>
                 <g clipPath="url(#pc)">
-                  {rects.map((rect, i) => {
-                    const sx = toSx(rect.x), sz = toSz(rect.z);
-                    const rw = rect.w * scale, rd = rect.d * scale;
-                    const aLen = Math.min(rw, rd) * 0.38;
-                    const ax = Math.sin(rect.rotY) * aLen;
-                    const az = -Math.cos(rect.rotY) * aLen;
-                    return (
+                  {rects.map((rect,i)=>{
+                    const sx=toSx(rect.x),sz=toSz(rect.z);
+                    const rw=rect.w*scale,rd=rect.d*scale;
+                    const aLen=Math.min(rw,rd)*0.38;
+                    const ax=-Math.sin(rect.rotY)*aLen,az=-Math.cos(rect.rotY)*aLen;
+                    return(
                       <g key={i}>
-                        <rect x={sx - rw/2} y={sz - rd/2} width={rw} height={rd}
-                          fill="#1a2a4a" stroke="#5b4bff" strokeWidth="1.5" rx="2"/>
-                        <line x1={sx} y1={sz} x2={sx + ax} y2={sz + az}
-                          stroke="#00e5ff" strokeWidth="1.5" strokeLinecap="round"/>
-                        <circle cx={sx + ax} cy={sz + az} r="2.5" fill="#00e5ff"/>
+                        <rect x={sx-rw/2} y={sz-rd/2} width={rw} height={rd} fill={`${rect.color}22`} stroke={rect.color} strokeWidth="1.5" rx="2"/>
+                        <line x1={sx} y1={sz} x2={sx+ax} y2={sz+az} stroke={rect.color} strokeWidth="1.5" strokeLinecap="round"/>
+                        <circle cx={sx+ax} cy={sz+az} r="2.5" fill={rect.color}/>
                       </g>
                     );
                   })}
@@ -5575,17 +5525,386 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
         })()}
 
         {/* Footer */}
-        <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
-          <button onClick={onCancel}
-            style={{ flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, color: "#94a3b8", padding: "11px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>
-            Cancel
-          </button>
-          <button onClick={handlePlace} disabled={!activeCells.length || !selectedDef || loadingDims}
-            style={{ flex: 2, background: activeCells.length && selectedDef && !loadingDims ? "linear-gradient(135deg, #5b4bff, #7c6dff)" : "#1e2035", border: "none", borderRadius: 10, color: activeCells.length && selectedDef && !loadingDims ? "#fff" : "#475569", padding: "11px", fontSize: 13, cursor: activeCells.length && selectedDef && !loadingDims ? "pointer" : "default", fontWeight: 700 }}>
-            {loadingDims ? "Measuring…" : `Place ${activeCells.length > 0 ? `${activeCells.length} objects` : ""}`}
+        <div style={{display:"flex",gap:10,marginTop:4}}>
+          <button onClick={onCancel} style={{flex:1,background:"#13162a",border:"1px solid #1e2035",borderRadius:10,color:"#94a3b8",padding:"11px",fontSize:13,cursor:"pointer",fontWeight:600}}>Cancel</button>
+          <button onClick={handlePlace} disabled={!activeCells.length||!activeBrush}
+            style={{flex:2,background:activeCells.length&&activeBrush?"linear-gradient(135deg,#5b4bff,#7c6dff)":"#1e2035",border:"none",borderRadius:10,color:activeCells.length&&activeBrush?"#fff":"#475569",padding:"11px",fontSize:13,cursor:activeCells.length&&activeBrush?"pointer":"default",fontWeight:700}}>
+            Place {activeCells.length>0?`${activeCells.length} objects`:""}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
 
+// ===================== Layout 2D Overlay =====================
+function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, floorD, floorPlan, selectedUids, selectedWallUid, activeTool, setActiveTool, onMoveItems, onMoveWall, onSelectUids, onSelectWall, onAddWall, unit, UNITS, fmt, metersTo }) {
+  const svgRef = React.useRef(null);
+  const [size, setSize] = React.useState({ w: 800, h: 600 });
+  const [wallStart, setWallStart] = React.useState(null);
+  const [mouseWorld, setMouseWorld] = React.useState(null);
+  const [dragging, setDragging] = React.useState(null);
+  const [columnDrag, setColumnDrag] = React.useState(null);
+  const [, forceUpdate] = React.useReducer(x => x+1, 0);
+  const wallSessionRef = React.useRef(null); // groupId for current wall session
+  const dragWasActiveRef = React.useRef(false); // prevent click after drag
+
+  // resize observer
+  React.useEffect(() => {
+    const el = mountRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      setSize({ w: el.clientWidth, h: el.clientHeight });
+      forceUpdate();
+    });
+    ro.observe(el);
+    setSize({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, []);
+
+  // re-render when camera changes (pan/zoom)
+  React.useEffect(() => {
+    let raf;
+    const loop = () => { forceUpdate(); raf = requestAnimationFrame(loop); };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // world → screen: in top-down Three.js ortho, +X = right, +Z = INTO screen (down in SVG)
+  const worldToScreen = React.useCallback((wx, wz) => {
+    const cam = threeRef.current?.orthoCam;
+    const target = threeRef.current?.target;
+    if (!cam || !target) return { x: 0, y: 0 };
+    const { left, right, top, bottom } = cam;
+    const tw = right - left, th = top - bottom;
+    const relX = wx - target.x;
+    const relZ = wz - target.z;
+    const nx = (relX - left) / tw;
+    const ny = (relZ - bottom) / th; // Z increases downward in SVG (NOT flipped)
+    return { x: nx * size.w, y: ny * size.h };
+  }, [size, threeRef]);
+
+  const screenToWorld = React.useCallback((sx, sy) => {
+    const cam = threeRef.current?.orthoCam;
+    const target = threeRef.current?.target;
+    if (!cam || !target) return { x: 0, z: 0 };
+    const { left, right, top, bottom } = cam;
+    const tw = right - left, th = top - bottom;
+    const nx = sx / size.w;
+    const ny = sy / size.h;
+    const wx = nx * tw + left + target.x;
+    const wz = ny * th + bottom + target.z;
+    return { x: wx, z: wz };
+  }, [size, threeRef]);
+
+  const snapWorld = (x, z, shiftKey) => {
+    if (shiftKey) return { x, z };
+    const snap = 0.25;
+    return { x: Math.round(x / snap) * snap, z: Math.round(z / snap) * snap };
+  };
+
+  const getWorldFromEvent = (e) => {
+    const rect = svgRef.current.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    return snapWorld(...Object.values(screenToWorld(sx, sy)), e.shiftKey);
+  };
+
+  // keyboard shortcuts
+  React.useEffect(() => {
+    const onKey = (e) => {
+      if (!['INPUT','TEXTAREA'].includes(e.target.tagName)) {
+        if (e.key === 'v' || e.key === 'V') setActiveTool('select');
+        if (e.key === 'w' || e.key === 'W') setActiveTool('wall');
+        if (e.key === 'c' || e.key === 'C') setActiveTool('column');
+        if (e.key === 'Escape') { setWallStart(null); wallSessionRef.current = null; setActiveTool('select'); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const draggingRef = React.useRef(null);
+  draggingRef.current = dragging;
+
+  React.useEffect(() => {
+    const onMove = (e) => {
+      const rect = svgRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+      const raw = screenToWorld(sx, sy);
+      const w = snapWorld(raw.x, raw.z, e.shiftKey);
+      setMouseWorld(w);
+      if (columnDrag) setColumnDrag((prev) => prev ? { ...prev, end: w } : null);
+      const drag = draggingRef.current;
+      if (!drag) return;
+      const dx = w.x - drag.startWorld.x;
+      const dz = w.z - drag.startWorld.z;
+      if (drag.type === 'items') {
+        const patches = {};
+        Object.entries(drag.startPositions).forEach(([uid, pos]) => { patches[uid] = { x: pos.x+dx, z: pos.z+dz }; });
+        onMoveItems(patches);
+      } else if (drag.type === 'endpoints') {
+        drag.epPatches.forEach(ep => {
+          if (ep.ep === 'start') onMoveWall(ep.uid, { x1: ep.x1+dx, z1: ep.z1+dz, x2: ep.x2, z2: ep.z2 });
+          else onMoveWall(ep.uid, { x1: ep.x1, z1: ep.z1, x2: ep.x2+dx, z2: ep.z2+dz });
+        });
+      } else if (drag.type === 'wallGroup') {
+        drag.groupWalls.forEach(gw => {
+          const pos = drag.startPositions[gw.uid];
+          if (pos) onMoveWall(gw.uid, { x1: pos.x1+dx, z1: pos.z1+dz, x2: pos.x2+dx, z2: pos.z2+dz });
+        });
+      } else if (drag.type === 'wall') {
+        const pos = drag.startPositions;
+        if (pos.isColumn) { onMoveWall(drag.uid, { x: pos.x+dx, z: pos.z+dz }); }
+        else { onMoveWall(drag.uid, { x1: pos.x1+dx, z1: pos.z1+dz, x2: pos.x2+dx, z2: pos.z2+dz }); }
+      }
+    };
+    const onUp = (e) => {
+      if (draggingRef.current) {
+        dragWasActiveRef.current = true;
+        setDragging(null);
+      }
+      if (columnDrag) {
+        const rect = svgRef.current?.getBoundingClientRect();
+        if (rect) {
+          const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+          const w = screenToWorld(sx, sy);
+          const cw = Math.abs(w.x - columnDrag.start.x), cd = Math.abs(w.z - columnDrag.start.z);
+          if (cw > 0.05 || cd > 0.05) {
+            dragWasActiveRef.current = true; // prevent onClick from firing
+            onAddWall({ uid: `col_${Date.now()}`, type: 'column', x: (columnDrag.start.x+w.x)/2, z: (columnDrag.start.z+w.z)/2, width: Math.max(0.1,cw), depth: Math.max(0.1,cd), height: 2.8, color: "#888888" });
+          }
+        }
+        setColumnDrag(null);
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, [dragging, columnDrag, screenToWorld, onMoveItems, onMoveWall, onAddWall]);
+
+  const handleMouseMove = (e) => {
+    const w = getWorldFromEvent(e);
+    setMouseWorld(w);
+  };
+
+  const handleSvgClick = (e) => {
+    if (dragWasActiveRef.current) { dragWasActiveRef.current = false; return; }
+    const w = getWorldFromEvent(e);
+    if (activeTool === 'wall') {
+      if (!wallStart) {
+        wallSessionRef.current = `wallgroup_${Date.now()}`;
+        setWallStart(w);
+      } else {
+        const wallConfig = { height: 2.4, thickness: 0.1, glassRatio: 0, color: "#ffffff" };
+        onAddWall({ uid: `wall_${Date.now()}`, x1: wallStart.x, z1: wallStart.z, x2: w.x, z2: w.z, groupId: wallSessionRef.current, ...wallConfig });
+        setWallStart(w);
+      }
+    } else if (activeTool === 'select') {
+      onSelectUids([]);
+      onSelectWall(null);
+    }
+  };
+
+  const cursorStyle = {
+    select: 'default',
+    wall: 'crosshair',
+    column: 'crosshair',
+    door: 'crosshair',
+    model: 'copy',
+  }[activeTool] || 'default';
+
+  const isDrawingTool = activeTool === 'wall' || activeTool === 'column';
+
+  // scale factor: pixels per meter
+  const cam = threeRef.current?.orthoCam;
+  const pxPerMeter = cam ? size.w / (cam.right - cam.left) : 50;
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, zIndex: 10, pointerEvents: 'none' }}>
+      {/* Toolbar — always interactive */}
+      <div style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', display: 'flex', flexDirection: 'column', gap: 4, background: 'rgba(13,17,23,0.92)', border: '1px solid #1e2035', borderRadius: 12, padding: 6, backdropFilter: 'blur(8px)', zIndex: 20, pointerEvents: 'all' }}>
+        {[
+          ['select', 'V', <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 3l14 9-7 1-4 7z"/></svg>],
+          ['wall', 'W', <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>],
+          ['column', 'C', <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="8" y="3" width="8" height="18" rx="1"/></svg>],
+        ].map(([tool, key, icon]) => (
+          <button key={tool} onClick={() => { setActiveTool(tool); if (tool !== 'wall') setWallStart(null); setColumnDrag(null); }}
+            title={`${tool.charAt(0).toUpperCase()+tool.slice(1)} (${key})`}
+            style={{ width: 36, height: 36, borderRadius: 8, border: `1px solid ${activeTool===tool?'#00e5ff':'transparent'}`, background: activeTool===tool?'rgba(0,229,255,0.15)':'transparent', color: activeTool===tool?'#00e5ff':'#64748b', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
+            {icon}
+            <span style={{ position: 'absolute', bottom: 2, right: 3, fontSize: 7, opacity: 0.5, fontWeight: 700 }}>{key}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* SVG — background transparent to pointer events unless drawing */}
+      <svg ref={svgRef} width={size.w} height={size.h}
+        style={{ position: 'absolute', inset: 0, cursor: cursorStyle, pointerEvents: 'none' }}
+        onMouseMove={handleMouseMove}>
+
+        {/* Invisible hit area — only active when drawing */}
+        {isDrawingTool && (
+          <rect x={0} y={0} width={size.w} height={size.h} fill="transparent"
+            style={{ pointerEvents: 'all', cursor: cursorStyle }}
+            onMouseDown={(e) => {
+              if (activeTool === 'column') {
+                const w = getWorldFromEvent(e);
+                setColumnDrag({ start: w, end: w });
+              }
+            }}
+            onClick={handleSvgClick}
+            onContextMenu={(e) => { e.preventDefault(); setWallStart(null); setColumnDrag(null); }}
+          />
+        )}
+
+        {/* Walls */}
+        {walls.filter(w => w.type !== 'column').map((wall) => {
+          const p1 = worldToScreen(wall.x1, wall.z1);
+          const p2 = worldToScreen(wall.x2, wall.z2);
+          const selectedWall = walls.find(w => w.uid === selectedWallUid);
+          const isSelected = wall.uid === selectedWallUid || (selectedWall?.groupId && wall.groupId === selectedWall.groupId);
+          return (
+            <g key={wall.uid} style={{ pointerEvents: 'all' }} onMouseDown={(e) => {
+              e.stopPropagation();
+              if (activeTool === 'select') {
+                // select whole wall group if it has one
+                const groupId = wall.groupId;
+                const groupWalls = groupId ? walls.filter(w => w.groupId === groupId) : [wall];
+                onSelectWall(wall.uid);
+                const ww = getWorldFromEvent(e);
+                // store all walls in group for moving together
+                const startPositions = {};
+                groupWalls.forEach(gw => { startPositions[gw.uid] = { x1: gw.x1, z1: gw.z1, x2: gw.x2, z2: gw.z2 }; });
+                setDragging({ type: 'wallGroup', groupWalls, startWorld: ww, startPositions });
+              }
+            }}>
+              <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="transparent" strokeWidth={12} style={{ cursor: 'pointer' }} />
+              <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
+                stroke={isSelected ? '#00e5ff' : '#e2e8f0'} strokeWidth={isSelected ? 3 : 2} strokeLinecap="round"/>
+              {isSelected && <>
+                {[{x: p1.x, y: p1.y, ep: 'start'}, {x: p2.x, y: p2.y, ep: 'end'}].map(({x, y, ep}) => (
+                  <circle key={ep} cx={x} cy={y} r={6} fill="#00e5ff" stroke="#0d0f18" strokeWidth={1.5}
+                    style={{ cursor: 'grab', pointerEvents: 'all' }}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      const pt = ep === 'start' ? {x: wall.x1, z: wall.z1} : {x: wall.x2, z: wall.z2};
+                      const snapDist = (wall.thickness || 0.1) * 2;
+                      // find all walls that share this endpoint
+                      const connected = walls.filter(w => w.uid !== wall.uid && w.type !== 'column' && (
+                        Math.hypot(w.x1-pt.x, w.z1-pt.z) < snapDist ||
+                        Math.hypot(w.x2-pt.x, w.z2-pt.z) < snapDist
+                      ));
+                      const ww = getWorldFromEvent(e);
+                      // build endpoint patch info for each affected wall
+                      const epPatches = [{ uid: wall.uid, ep, x1: wall.x1, z1: wall.z1, x2: wall.x2, z2: wall.z2 }];
+                      connected.forEach(cw => {
+                        const isStart = Math.hypot(cw.x1-pt.x, cw.z1-pt.z) < snapDist;
+                        epPatches.push({ uid: cw.uid, ep: isStart ? 'start' : 'end', x1: cw.x1, z1: cw.z1, x2: cw.x2, z2: cw.z2 });
+                      });
+                      setDragging({ type: 'endpoints', startWorld: ww, epPatches });
+                    }}/>
+                ))}
+              </>}
+            </g>
+          );
+        })}
+
+        {/* Columns */}
+        {walls.filter(w => w.type === 'column').map((col) => {
+          const p = worldToScreen(col.x, col.z);
+          const hw = (col.width || 0.3) * pxPerMeter / 2;
+          const hd = (col.depth || 0.3) * pxPerMeter / 2;
+          const isSelected = col.uid === selectedWallUid;
+          return (
+            <g key={col.uid} style={{ pointerEvents: 'all' }} onMouseDown={(e) => {
+              e.stopPropagation();
+              if (activeTool === 'select') {
+                onSelectWall(col.uid);
+                const w = getWorldFromEvent(e);
+                setDragging({ type: 'wall', uid: col.uid, startWorld: w, startPositions: { isColumn: true, x: col.x, z: col.z } });
+              }
+            }}>
+              <rect x={p.x-hw} y={p.y-hd} width={hw*2} height={hd*2}
+                fill={isSelected?'rgba(0,229,255,0.2)':'rgba(100,116,139,0.3)'}
+                stroke={isSelected?'#00e5ff':'#94a3b8'} strokeWidth={isSelected?2:1.5} style={{ cursor: 'pointer' }}/>
+            </g>
+          );
+        })}
+
+        {/* Items */}
+        {items.map((it) => {
+          const def = catalog.find(c => c.id === it.catalogId);
+          if (!def) return null;
+          const w = (def.w || 1) * pxPerMeter;
+          const d = (def.d || 1) * pxPerMeter;
+          const p = worldToScreen(it.x, it.z);
+          const isSelected = selectedUids.includes(it.uid);
+          const angle = it.rotY * 180 / Math.PI; // corrected: no negation
+          return (
+            <g key={it.uid} transform={`rotate(${angle},${p.x},${p.y})`}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                if (activeTool === 'select') {
+                  const newSel = e.shiftKey ? (selectedUids.includes(it.uid) ? selectedUids.filter(u=>u!==it.uid) : [...selectedUids, it.uid]) : [it.uid];
+                  onSelectUids(newSel);
+                  const ww = getWorldFromEvent(e);
+                  const startPos = {};
+                  newSel.forEach(uid => { const item = items.find(i=>i.uid===uid); if (item) startPos[uid]={x:item.x,z:item.z}; });
+                  setDragging({ type:'items', startWorld:ww, startPositions:startPos });
+                }
+              }}>
+              <rect x={p.x-w/2} y={p.y-d/2} width={w} height={d}
+                fill={isSelected?`${it.color||'#5b4bff'}44`:`${it.color||'#5b4bff'}22`}
+                stroke={isSelected?'#00e5ff':it.color||'#5b4bff'}
+                strokeWidth={isSelected?2:1.5} rx={3} style={{ cursor: activeTool==='select'?'grab':'default' }}/>
+              <line x1={p.x} y1={p.y} x2={p.x} y2={p.y-d*0.35} stroke={isSelected?'#00e5ff':'rgba(255,255,255,0.4)'} strokeWidth={1.5} strokeLinecap="round"/>
+              <circle cx={p.x} cy={p.y-d*0.35} r={2.5} fill={isSelected?'#00e5ff':'rgba(255,255,255,0.4)'}/>
+              {w > 40 && <text x={p.x} y={p.y+4} textAnchor="middle" fontSize={Math.min(11,w/6)} fill="rgba(255,255,255,0.7)" fontWeight="600" style={{pointerEvents:'none'}}>{def.name}</text>}
+            </g>
+          );
+        })}
+
+        {/* Wall preview while drawing */}
+        {activeTool === 'wall' && wallStart && mouseWorld && (() => {
+          const p1 = worldToScreen(wallStart.x, wallStart.z);
+          const p2 = worldToScreen(mouseWorld.x, mouseWorld.z);
+          const len = Math.hypot(mouseWorld.x-wallStart.x, mouseWorld.z-wallStart.z);
+          return (
+            <>
+              <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#00e5ff" strokeWidth={2} strokeDasharray="6 3" strokeLinecap="round"/>
+              <circle cx={p1.x} cy={p1.y} r={5} fill="#00e5ff" stroke="#0d0f18" strokeWidth={1.5}/>
+              <circle cx={p2.x} cy={p2.y} r={4} fill="#00e5ff" opacity={0.6}/>
+              <text x={(p1.x+p2.x)/2} y={(p1.y+p2.y)/2-8} textAnchor="middle" fontSize={11} fill="#00e5ff" fontWeight="700">
+                {fmt(metersTo(len, unit))}{UNITS[unit].label}
+              </text>
+            </>
+          );
+        })()}
+
+        {/* Column drag preview */}
+        {activeTool === 'column' && columnDrag && (() => {
+          const p1 = worldToScreen(columnDrag.start.x, columnDrag.start.z);
+          const p2 = worldToScreen(columnDrag.end.x, columnDrag.end.z);
+          const x = Math.min(p1.x,p2.x), y = Math.min(p1.y,p2.y);
+          const w = Math.abs(p2.x-p1.x), h = Math.abs(p2.y-p1.y);
+          return <rect x={x} y={y} width={w} height={h} fill="rgba(0,229,255,0.1)" stroke="#00e5ff" strokeWidth={2} strokeDasharray="5 3" style={{pointerEvents:'none'}}/>;
+        })()}
+
+        {/* Cursor dot */}
+        {(activeTool === 'wall' || (activeTool === 'column' && !columnDrag)) && mouseWorld && (() => {
+          const p = worldToScreen(mouseWorld.x, mouseWorld.z);
+          return <circle cx={p.x} cy={p.y} r={4} fill="#00e5ff" opacity={0.7} style={{pointerEvents:'none'}}/>;
+        })()}
+      </svg>
+
+      {/* Tool hint */}
+      <div style={{ position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)', background: 'rgba(13,17,23,0.85)', border: '1px solid #1e2035', borderRadius: 8, padding: '5px 12px', fontSize: 10, color: '#64748b', backdropFilter: 'blur(8px)', pointerEvents: 'none' }}>
+        {activeTool === 'wall' && !wallStart && 'Click to start wall'}
+        {activeTool === 'wall' && wallStart && 'Click to place · Right-click or Esc to stop'}
+        {activeTool === 'select' && 'Click to select · Drag to move · Shift+click = multi-select'}
+        {activeTool === 'column' && 'Click to place column'}
       </div>
     </div>
   );
