@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import * as THREE from "three";
 
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.1.7";
 
 // ===================== Units =====================
 const UNITS = {
@@ -5063,7 +5063,7 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
     if (!empty.length) return 0;
     // pick the facing direction of the first empty side
     const faceMap = {
-      [`${r-1},${c}`]: Math.PI,   // north empty → face south
+      [`${r-1},${c}`]: Math.PI,    // north empty → face south (away from north neighbor)
       [`${r},${c+1}`]: -Math.PI/2, // east empty → face west
       [`${r+1},${c}`]: 0,          // south empty → face north
       [`${r},${c-1}`]: Math.PI/2,  // west empty → face east
@@ -5192,11 +5192,10 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
       if (cell.isIntersection) {
         // intersection point: ri,ci in the interleaved grid
         const { ri, ci } = cell;
-        const r = (ri - 1) / 2; // row above
-        const c = (ci - 1) / 2; // col to the left (if ci is odd)
+        const r = (ri - 1) / 2;
+        const c = (ci - 1) / 2;
         const isInterRow = ri % 2 === 1;
         const isInterCol = ci % 2 === 1;
-        // X: midpoint between col c and col c+1 (if inter-col), else col center
         if (isInterCol) {
           const x1 = colX[c] !== undefined ? colX[c] + (colWidths[c] || 0) / 2 : 0;
           const x2 = colX[c+1] !== undefined ? colX[c+1] - (colWidths[c+1] || 0) / 2 : x1;
@@ -5204,7 +5203,6 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
         } else {
           wx = colX[Math.floor(ci / 2)] || 0;
         }
-        // Z: midpoint between row r and row r+1 (if inter-row), else row center
         if (isInterRow) {
           const z1 = rowZ[r] !== undefined ? rowZ[r] + (rowDepths[r] || 0) / 2 : 0;
           const z2 = rowZ[r+1] !== undefined ? rowZ[r+1] - (rowDepths[r+1] || 0) / 2 : z1;
@@ -5212,6 +5210,10 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
         } else {
           wz = rowZ[Math.floor(ri / 2)] || 0;
         }
+        // offset by half depth so the object edge sits on the boundary, not its center
+        const threeRotY = cell.rotY + Math.PI;
+        wx += Math.sin(threeRotY) * (modelD / 2);
+        wz += Math.cos(threeRotY) * (modelD / 2);
       } else {
         const [row, col] = key.split(",").map(Number);
         const sz = cellSize(cell.rotY);
@@ -5231,7 +5233,7 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
         kind: "model",
         x: wx,
         z: wz,
-        rotY: cell.rotY,
+        rotY: cell.rotY + Math.PI,
         color: varyColor(color, idx),
         sockets: {},
         groupIds: [groupId],
@@ -5256,7 +5258,7 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
 
   // Arrow SVG for cell direction indicator
   const ArrowSvg = ({ rotY, size = 18 }) => {
-    const deg = (rotY * 180 / Math.PI);
+    const deg = -(rotY * 180 / Math.PI); // negate to match 3D: rotY=0 faces +Z = down in grid
     return (
       <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#00e5ff" strokeWidth="2.5"
         style={{ transform: `rotate(${deg}deg)`, pointerEvents: "none" }}>
@@ -5417,7 +5419,19 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
                       const active = cell?.active;
                       const rotY = cell?.rotY || 0;
                       return (
-                        <div key={ci} onClick={() => toggleCell(r, c)}
+                        <div key={ci} onClick={() => {
+                          const key = `${r},${c}`;
+                          setCells((prev) => {
+                            const existing = prev[key];
+                            if (existing?.active) {
+                              const cur = existing.rotY || 0;
+                              const idx = ARROW_DIRS.findIndex(d => Math.abs(d - cur) < 0.01);
+                              return { ...prev, [key]: { ...existing, rotY: ARROW_DIRS[(idx + 1) % ARROW_DIRS.length] } };
+                            }
+                            return { ...prev, [key]: { active: true, rotY: autoRotate(r, c, prev) } };
+                          });
+                        }}
+                        onContextMenu={(e) => { e.preventDefault(); setCells((prev) => { const key = `${r},${c}`; if (!prev[key]?.active) return prev; return { ...prev, [key]: { ...prev[key], active: false } }; }); }}
                           style={{
                             width: CELL_PX, height: CELL_PX, borderRadius: 8, cursor: "pointer",
                             background: active ? "#1a2a4a" : "#13162a",
@@ -5437,8 +5451,6 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
                                 <button key={dir} onClick={(e) => { e.stopPropagation(); setCells((prev) => { const k = `${r},${c}`; if (!prev[k]) return prev; const cur = prev[k].snap; return { ...prev, [k]: { ...prev[k], snap: cur === dir ? null : dir } }; }); }}
                                   style={{ position: 'absolute', ...pos, width: 8, height: 8, borderRadius: '50%', padding: 0, background: cell?.snap === dir ? '#00e5ff' : '#1e2035', border: `1px solid ${cell?.snap === dir ? '#00e5ff' : '#2a3060'}`, cursor: 'pointer' }} />
                               ))}
-                              <button onClick={(e) => rotateCell(e, r, c)}
-                                style={{ position: "absolute", bottom: 3, right: 3, width: 15, height: 15, borderRadius: 3, background: "#5b4bff", border: "none", color: "#fff", fontSize: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, lineHeight: 1 }}>↻</button>
                             </>
                           )}
                         </div>
@@ -5453,7 +5465,7 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
 
         {/* Legend */}
         <div style={{ fontSize: 10, color: "#475569", textAlign: "center" }}>
-          Click cell to toggle · ↻ rotate · dots = snap · points between cells = half position
+          Click = activate/rotate · Right-click = remove · edge dots = snap · points between cells = half position
         </div>
 
         {/* Preview */}
@@ -5540,14 +5552,14 @@ function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, meter
                     const rw = rect.w * scale, rd = rect.d * scale;
                     const aLen = Math.min(rw, rd) * 0.38;
                     const ax = Math.sin(rect.rotY) * aLen;
-                    const az = Math.cos(rect.rotY) * aLen;
+                    const az = -Math.cos(rect.rotY) * aLen;
                     return (
                       <g key={i}>
                         <rect x={sx - rw/2} y={sz - rd/2} width={rw} height={rd}
                           fill="#1a2a4a" stroke="#5b4bff" strokeWidth="1.5" rx="2"/>
-                        <line x1={sx} y1={sz} x2={sx - ax} y2={sz - az}
+                        <line x1={sx} y1={sz} x2={sx + ax} y2={sz + az}
                           stroke="#00e5ff" strokeWidth="1.5" strokeLinecap="round"/>
-                        <circle cx={sx - ax} cy={sz - az} r="2.5" fill="#00e5ff"/>
+                        <circle cx={sx + ax} cy={sz + az} r="2.5" fill="#00e5ff"/>
                       </g>
                     );
                   })}
