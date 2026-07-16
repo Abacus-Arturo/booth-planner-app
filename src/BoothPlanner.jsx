@@ -539,6 +539,12 @@ export default function BoothPlannerV2() {
   const [hiddenCatalogIds, setHiddenCatalogIds] = useState(new Set());
   const [appSettings, setAppSettings] = useState({ animations: true });
   const [showSettings, setShowSettings] = useState(false);
+  const [showIslandBuilder, setShowIslandBuilder] = useState(false);
+  const [layoutMode, setLayoutMode] = useState(false);
+  const layoutModeRef = useRef(false);
+  useEffect(() => { layoutModeRef.current = layoutMode; }, [layoutMode]);
+  const setLayoutModeUIRef = useRef(null);
+  useEffect(() => { setLayoutModeUIRef.current = setLayoutMode; }, []);
   const appSettingsRef = useRef(appSettings);
   useEffect(() => { appSettingsRef.current = appSettings; }, [appSettings]);
   const toggleCatalogVisibility = (id) => setHiddenCatalogIds((prev) => {
@@ -712,15 +718,40 @@ export default function BoothPlannerV2() {
       side: { theta: Math.PI / 2, phi: Math.PI / 2 },
       iso: { theta: Math.PI / 4, phi: Math.PI / 3.2 },
     };
+
+    const setTopMode = (isTop, isLayout = false) => {
+      if (isTop) {
+        hemi.intensity = 0;
+        ambient.intensity = isLayout ? 3.5 : 2.2;
+        key.intensity = 0;
+        fill.intensity = 0;
+        rim.intensity = 0;
+        floor.material.color.setHex(isLayout ? 0x0d0f18 : 0xf0f0f0);
+        floor.material.roughness = 1;
+        renderer.shadowMap.enabled = false;
+      } else {
+        hemi.intensity = 0.7;
+        ambient.intensity = 0.25;
+        key.intensity = 2.4;
+        fill.intensity = 0.5;
+        rim.intensity = 0.7;
+        floor.material.color.setHex(floorColorRef.current ? parseInt(floorColorRef.current.replace('#',''), 16) : 0x878787);
+        floor.material.roughness = 0.85;
+        renderer.shadowMap.enabled = true;
+      }
+    };
+
     const setView = (name) => {
       if (name === "free") {
         useOrtho = false; activeCam = camera;
         camera.aspect = mount.clientWidth / mount.clientHeight; camera.updateProjectionMatrix();
+        setTopMode(false);
       } else {
         const a = VIEW_ANGLES[name];
         theta = a.theta; phi = a.phi;
         useOrtho = true; activeCam = orthoCam;
         updateCamera();
+        setTopMode(name === "top");
       }
     };
 
@@ -728,10 +759,14 @@ export default function BoothPlannerV2() {
     let isPanning = false, panLastX = 0, panLastY = 0;
     const dom = renderer.domElement;
     const onDown = (e) => {
+      if (layoutModeRef.current) {
+        // in layout mode only allow pan, no orbit
+        if (e.button === 1 || (e.button === 0 && e.ctrlKey)) { isPanning = true; panLastX = e.clientX; panLastY = e.clientY; e.preventDefault(); }
+        return;
+      }
       if (e.button === 2) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; }
       else if (e.button === 1) { isPanning = true; panLastX = e.clientX; panLastY = e.clientY; e.preventDefault(); }
       else if (e.button === 0 && e.altKey) { isOrbiting = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); }
-      // Ctrl + left drag = pan (Magic Mouse friendly)
       else if (e.button === 0 && e.ctrlKey) { isPanning = true; panLastX = e.clientX; panLastY = e.clientY; e.preventDefault(); }
     };
     const onMoveOrbit = (e) => {
@@ -793,7 +828,9 @@ export default function BoothPlannerV2() {
 
       // Zoom — normalizado y menos sensible
       const zoomDelta = normY * 0.003;
-      radius = Math.min(Math.max(radius + zoomDelta * radius * 0.1, 3), 40);
+      const minRadius = layoutModeRef.current ? 1 : 3;
+      const maxRadius = layoutModeRef.current ? 80 : 40;
+      radius = Math.min(Math.max(radius + zoomDelta * radius * 0.1, minRadius), maxRadius);
       updateCamera();
     };
     const onCtx = (e) => e.preventDefault();
@@ -1937,13 +1974,33 @@ export default function BoothPlannerV2() {
       getActiveCamera: () => activeCam,
       syncSize: onResize,
       setView: (name) => { setView(name); threeRef.current.viewName = name; setViewUIRef.current && setViewUIRef.current(name); },
+      applyLayoutMode: (enabled) => {
+        if (enabled) {
+          theta = 0; phi = 0.001;
+          useOrtho = true; activeCam = orthoCam;
+          updateCamera();
+          setTopMode(true, true);
+          threeRef.current.viewName = "top";
+          setViewUIRef.current && setViewUIRef.current("top");
+          setLayoutModeUIRef.current && setLayoutModeUIRef.current(true);
+        } else {
+          useOrtho = false; activeCam = camera;
+          camera.aspect = mount.clientWidth / mount.clientHeight; camera.updateProjectionMatrix();
+          setTopMode(false);
+          threeRef.current.viewName = "free";
+          setViewUIRef.current && setViewUIRef.current("free");
+          setLayoutModeUIRef.current && setLayoutModeUIRef.current(false);
+        }
+      },
       resetCamera: () => {
         target.set(0, 0, 0);
         radius = 14; theta = Math.PI / 4; phi = Math.PI / 3.2;
         useOrtho = false; activeCam = camera;
         camera.aspect = mount.clientWidth / mount.clientHeight; camera.updateProjectionMatrix();
         updateCamera();
+        setTopMode(false);
         setViewUIRef.current && setViewUIRef.current("free");
+        setLayoutModeUIRef.current && setLayoutModeUIRef.current(false);
       },
       setSelected: (uid, shiftKey) => {
         if (!uid) { setSelectedUids([]); return; }
@@ -2118,10 +2175,11 @@ export default function BoothPlannerV2() {
 
   // Floor size + color sync
   useEffect(() => {
-    const { floor } = threeRef.current;
+    const { floor, viewName } = threeRef.current;
     if (!floor) return;
     floor.scale.set(floorW, floorD, 1);
-    if (floor.material) floor.material.color.set(floorDark ? "#1a1a1a" : floorColor);
+    // don't override the top-view flat floor color
+    if (floor.material && viewName !== "top") floor.material.color.set(floorDark ? "#1a1a1a" : floorColor);
   }, [floorW, floorD, floorColor, floorDark]);
 
   // ===================== Floor plan image sync =====================
@@ -2145,6 +2203,15 @@ export default function BoothPlannerV2() {
     scene.add(mesh);
     return () => { scene.remove(mesh); mat.dispose(); geo.dispose(); };
   }, [floorPlan]);
+
+  useEffect(() => {
+    const { scene } = threeRef.current;
+    if (!scene) return;
+    const mesh = scene.getObjectByName("__floorPlanMesh");
+    if (mesh?.material) {
+      mesh.material.opacity = layoutMode ? Math.min(1, (floorPlan?.opacity ?? 0.5) * 1.8) : (floorPlan?.opacity ?? 0.5);
+    }
+  }, [layoutMode, floorPlan]);
 
   // ===================== Sync wall handles + array handles =====================
   useEffect(() => {
@@ -3041,7 +3108,71 @@ export default function BoothPlannerV2() {
       return { ...it, x: pivotX + dx * cos - dz * sin, z: pivotZ + dx * sin + dz * cos, rotY: it.rotY + delta };
     }));
   };
+  const alignSelected = (type) => {
+    if (selectedUids.length < 2) return;
+    const selItems = items.filter((it) => selectedUids.includes(it.uid));
+
+    // group items by outer groupId — treat each group as one unit
+    const unitMap = {};
+    selItems.forEach((it) => {
+      const gid = getOuterGroupId(it) || it.uid;
+      if (!unitMap[gid]) unitMap[gid] = { id: gid, uids: [] };
+      unitMap[gid].uids.push(it.uid);
+    });
+    Object.values(unitMap).forEach((u) => {
+      const its = selItems.filter((it) => u.uids.includes(it.uid));
+      u.cx = its.reduce((s, it) => s + it.x, 0) / its.length;
+      u.cz = its.reduce((s, it) => s + it.z, 0) / its.length;
+    });
+    const units = Object.values(unitMap);
+    const anchorUnit = units.find((u) => u.uids.includes(selectedUid)) || units[units.length - 1];
+
+    setItems((prev) => prev.map((it) => {
+      if (!selectedUids.includes(it.uid)) return it;
+      const unit = units.find((u) => u.uids.includes(it.uid));
+      if (!unit || unit.id === anchorUnit.id) return it;
+      const dx = it.x - unit.cx;
+      const dz = it.z - unit.cz;
+      if (type === 'x') return { ...it, x: anchorUnit.cx + dx };
+      if (type === 'z') return { ...it, z: anchorUnit.cz + dz };
+      if (type === 'both') return { ...it, x: anchorUnit.cx + dx, z: anchorUnit.cz + dz };
+      return it;
+    }));
+  };
+
   const deleteSelected = () => { setItems((prev) => prev.filter((it) => !selectedUids.includes(it.uid))); setSelectedUids([]); };
+  const mirrorSelected = () => {
+    if (!selectedUids.length || !selectedItem) return;
+    const selItems = items.filter((it) => selectedUids.includes(it.uid));
+    const def = findDef(selectedItem.kind, selectedItem.catalogId);
+    const depth = def?.d || 1;
+    // use the rotY of the first/pivot item as the group's facing direction
+    const rotY = selectedItem.rotY || 0;
+    // "back" direction = opposite of facing direction
+    const backX = Math.sin(rotY + Math.PI);
+    const backZ = Math.cos(rotY + Math.PI);
+    const groupId = `mirror_${Date.now()}`;
+    const newItems = selItems.map((it, idx) => ({
+      ...it,
+      uid: `${it.catalogId}_mirror_${Date.now()}_${idx}`,
+      x: it.x + backX * depth,
+      z: it.z + backZ * depth,
+      rotY: it.rotY + Math.PI,
+      groupIds: [groupId],
+      groupId: undefined,
+      pivotX: undefined,
+      pivotZ: undefined,
+    }));
+    // put originals and copies in the same group
+    const allUids = [...selItems.map((it) => it.uid), ...newItems.map((it) => it.uid)];
+    setItems((prev) => [
+      ...prev.map((it) => selectedUids.includes(it.uid)
+        ? { ...it, groupIds: [groupId], groupId: undefined, pivotX: undefined, pivotZ: undefined }
+        : it),
+      ...newItems,
+    ]);
+    setTimeout(() => threeRef.current.setSelectedGroup(allUids), 0);
+  };
   const duplicateSelected = () => {
     if (!selectedUids.length) return;
     const offset = 0.4;
@@ -3210,8 +3341,39 @@ export default function BoothPlannerV2() {
   const handleConfirmDimensions = (w, d) => {
     const m = floorPlanModal;
     setFloorW(w); setFloorD(d);
-    if (m.outlinePoints) {
-      setFloorPlan({ dataUrl: m.dataUrl, realW: m.realW, realH: m.realH, opacity: 0.5, x: -m.cx, z: -m.cz, visible: true });
+
+    if (m.outlinePoints && m.outlinePoints.length >= 3) {
+      // crop the image to the outline bounding box, masking outside the polygon
+      const pts = m.outlinePoints; // in image pixel coords
+      const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+      const minX = Math.max(0, Math.floor(Math.min(...xs)));
+      const minY = Math.max(0, Math.floor(Math.min(...ys)));
+      const maxX = Math.min(m.imgW, Math.ceil(Math.max(...xs)));
+      const maxY = Math.min(m.imgH, Math.ceil(Math.max(...ys)));
+      const cropW = maxX - minX;
+      const cropH = maxY - minY;
+
+      const cropCanvas = document.createElement("canvas");
+      cropCanvas.width = cropW;
+      cropCanvas.height = cropH;
+      const ctx = cropCanvas.getContext("2d");
+
+      // clip to polygon (shifted to crop coords)
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x - minX, pts[0].y - minY);
+      pts.slice(1).forEach((p) => ctx.lineTo(p.x - minX, p.y - minY));
+      ctx.closePath();
+      ctx.clip();
+
+      // draw the original image offset so the crop region aligns
+      const srcImg = new Image();
+      srcImg.onload = () => {
+        ctx.drawImage(srcImg, -minX, -minY);
+        const croppedDataUrl = cropCanvas.toDataURL("image/png");
+        // realW/realH are already in meters from the outline step
+        setFloorPlan({ dataUrl: croppedDataUrl, realW: w, realH: d, opacity: 0.5, x: 0, z: 0, visible: true });
+      };
+      srcImg.src = m.dataUrl;
     } else {
       setFloorPlan({ dataUrl: m.dataUrl, realW: m.realW, realH: m.realH, opacity: 0.5, x: 0, z: 0, visible: true });
     }
@@ -3358,6 +3520,20 @@ export default function BoothPlannerV2() {
 
   return (
     <>
+    {showIslandBuilder && (
+      <IslandBuilder
+        catalog={catalog.filter((c) => c.category !== "Props")}
+        thumbs={thumbnails}
+        catalogColors={catalogColors}
+        unit={unit} UNITS={UNITS} fmt={fmt} metersTo={metersTo}
+        onPlace={(newItems) => {
+          setItems((prev) => [...prev, ...newItems]);
+          setSelectedUids(newItems.map((i) => i.uid));
+          setShowIslandBuilder(false);
+        }}
+        onCancel={() => setShowIslandBuilder(false)}
+      />
+    )}
     {showSaveModal && (
       <div style={{ position: "fixed", inset: 0, zIndex: 2000, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center" }}>
         <div style={{ background: "#1b1d22", borderRadius: 12, padding: 24, width: 360, border: "1px solid #33363d" }}>
@@ -3758,6 +3934,19 @@ export default function BoothPlannerV2() {
           </div>
         )}
 
+        {/* Island Builder */}
+        <div style={{ padding: "0 12px 12px" }}>
+          <button onClick={() => setShowIslandBuilder(true)} style={{
+            width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: "linear-gradient(135deg, #1e2035, #252845)",
+            border: "1px solid #3d3f6e", borderRadius: 10, color: "#a5b4fc",
+            padding: "11px", fontSize: 13, cursor: "pointer", fontWeight: 600,
+          }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            Island Builder
+          </button>
+        </div>
+
         {/* Walls & Structure */}
         <Section title="Walls & Structure" defaultOpen={false} badge={walls.length || null} visible={layerVisibility.walls} onVisibilityToggle={() => setLayerVisibility((v) => ({ ...v, walls: !v.walls }))} locked={layerLock.walls} onLockToggle={() => setLayerLock((v) => ({ ...v, walls: !v.walls }))}>
           {/* Draw Wall button */}
@@ -3982,8 +4171,21 @@ export default function BoothPlannerV2() {
           );
         })()}
 
-        {/* View gizmo — top right */}
-        <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 3, background: "rgba(13,17,23,0.85)", borderRadius: 10, padding: 5, backdropFilter: "blur(8px)", border: "1px solid #1e2035" }}>
+        {/* 3D / Layout mode toggle — top right above gizmo */}
+        <div style={{ position: "absolute", top: 12, right: 12, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+          <div style={{ display: "flex", gap: 2, background: "rgba(13,17,23,0.85)", borderRadius: 10, padding: 4, backdropFilter: "blur(8px)", border: "1px solid #1e2035" }}>
+            <button onClick={() => { setLayoutMode(false); threeRef.current.applyLayoutMode(false); }}
+              style={{ padding: "5px 14px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, background: !layoutMode ? "#5b4bff" : "transparent", color: !layoutMode ? "#fff" : "#64748b" }}>
+              3D
+            </button>
+            <button onClick={() => { setLayoutMode(true); threeRef.current.applyLayoutMode(true); }}
+              style={{ padding: "5px 14px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700, background: layoutMode ? "#00e5ff" : "transparent", color: layoutMode ? "#0d0f18" : "#64748b" }}>
+              Layout
+            </button>
+          </div>
+
+        {/* View gizmo — hidden in layout mode */}
+        {!layoutMode && <div style={{ display: "flex", gap: 3, background: "rgba(13,17,23,0.85)", borderRadius: 10, padding: 5, backdropFilter: "blur(8px)", border: "1px solid #1e2035" }}>
           {[["free","Free","Perspective"],["top","Top","Ortho"],["front","Front","Ortho"],["side","Side","Ortho"],["iso","Iso","Ortho"]].map(([key, label, proj]) => (
             <button key={key} onClick={() => threeRef.current.setView(key)} style={{
               display: "flex", flexDirection: "column", alignItems: "center", gap: 1,
@@ -4000,6 +4202,7 @@ export default function BoothPlannerV2() {
             style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 38, background: "none", border: "none", color: "#64748b", cursor: "pointer", borderRadius: 7 }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
           </button>
+        </div>}
         </div>
 
         {/* Camera panel button — below gizmo */}
@@ -4032,12 +4235,12 @@ export default function BoothPlannerV2() {
             style={{ width: 36, height: 36, background: measureToolActive ? "#5b4bff" : "rgba(13,17,23,0.85)", border: `1px solid ${measureToolActive ? "#5b4bff" : "#1e2035"}`, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={measureToolActive ? "#fff" : "#64748b"} strokeWidth="2"><path d="M2 12h20M2 12l4-4M2 12l4 4M22 12l-4-4M22 12l-4 4"/></svg>
           </button>
-          <button onClick={() => setShowCameraPanel((v) => !v)}
+          {!layoutMode && <button onClick={() => setShowCameraPanel((v) => !v)}
             title="Cameras"
             style={{ width: 36, height: 36, background: showCameraPanel ? "#5b4bff" : "rgba(13,17,23,0.85)", border: "1px solid #1e2035", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={showCameraPanel ? "#fff" : "#64748b"} strokeWidth="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-          </button>
-          {showCameraPanel && (
+          </button>}
+          {!layoutMode && showCameraPanel && (
             <div style={{ position: "absolute", top: 44, right: 0, background: "rgba(13,17,23,0.95)", border: "1px solid #1e2035", borderRadius: 12, padding: 12, width: 200, backdropFilter: "blur(12px)", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: "#94a3b8", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.06em" }}>Saved Views</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10 }}>
@@ -4440,6 +4643,26 @@ export default function BoothPlannerV2() {
                     </button>
                   )}
                 </div>
+
+                {/* Alignment tools */}
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 6 }}>Align to last selected</div>
+                  <div style={{ display: "flex", gap: 3 }}>
+                    {[
+                      ['x',    'M12 3v18M7 8h10M7 16h10', 'X axis'],
+                      ['z',    'M3 12h18M8 7v10M16 7v10', 'Z axis'],
+                      ['both', 'M12 3v18M3 12h18',        'Both'],
+                    ].map(([type, path, label]) => (
+                      <button key={type} onClick={() => alignSelected(type)} title={`Align ${label}`}
+                        style={{ flex: 1, height: 30, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 6, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2">
+                          {path.split('M').filter(Boolean).map((d, i) => <path key={i} d={`M${d}`}/>)}
+                        </svg>
+                        <span style={{ fontSize: 9, color: "#64748b" }}>{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             );
 
@@ -4659,6 +4882,7 @@ export default function BoothPlannerV2() {
                 }
               }} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>↻ 90°</button>
               <button onClick={duplicateSelected} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>Duplicate</button>
+              <button onClick={mirrorSelected} style={{ flex: 1, background: "#1e2035", border: "1px solid #2a2f4a", borderRadius: 7, color: "#94a3b8", padding: "7px 4px", fontSize: 11, cursor: "pointer" }}>Mirror</button>
             </div>
             <div style={{ fontSize: 9, color: "#334155", marginBottom: 8 }}>Ctrl/Cmd + D to duplicate</div>
             <button onClick={deleteSelected}
@@ -4798,6 +5022,558 @@ function ModelDragArea({ def, kind, libraryReady, thumb, color, onDragStart }) {
   );
 }
 
+// ===================== Island Builder =====================
+function IslandBuilder({ catalog, thumbs, catalogColors, unit, UNITS, fmt, metersTo, onPlace, onCancel }) {
+  const [selectedModelId, setSelectedModelId] = React.useState(catalog[0]?.id || null);
+  const [cols, setCols] = React.useState(4);
+  const [rows, setRows] = React.useState(4);
+  const [cells, setCells] = React.useState({});
+  const [realDims, setRealDims] = React.useState(null); // { w, d } from actual GLB
+  const [loadingDims, setLoadingDims] = React.useState(false);
+
+  const selectedDef = catalog.find((c) => c.id === selectedModelId);
+
+  // load real GLB dims when model changes
+  React.useEffect(() => {
+    if (!selectedDef?.file) { setRealDims(null); return; }
+    setLoadingDims(true);
+    measureModelDims(selectedDef.file)
+      .then((dims) => { setRealDims({ w: dims.w, d: dims.d }); })
+      .catch(() => setRealDims(null))
+      .finally(() => setLoadingDims(false));
+  }, [selectedModelId]);
+
+  // use real dims if available, fallback to manifest
+  const modelW = realDims?.w || selectedDef?.w || 1;
+  const modelD = realDims?.d || selectedDef?.d || 1;
+
+  const CELL_PX = 56;
+  const ARROW_DIRS = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+
+  // auto-rotate: face away from most neighbours
+  const autoRotate = (r, c, activeCells) => {
+    const neighbours = [
+      [r - 1, c, 0],       // north neighbour → face south (Math.PI)
+      [r, c + 1, -Math.PI/2], // east → face west
+      [r + 1, c, 0],       // south → face north (0)
+      [r, c - 1, Math.PI/2],  // west → face east
+    ];
+    // find empty sides (exterior)
+    const empty = neighbours.filter(([nr, nc]) => !activeCells[`${nr},${nc}`]);
+    if (!empty.length) return 0;
+    // pick the facing direction of the first empty side
+    const faceMap = {
+      [`${r-1},${c}`]: Math.PI,   // north empty → face south
+      [`${r},${c+1}`]: -Math.PI/2, // east empty → face west
+      [`${r+1},${c}`]: 0,          // south empty → face north
+      [`${r},${c-1}`]: Math.PI/2,  // west empty → face east
+    };
+    // find the exterior side with fewest neighbours of its own (outermost corner)
+    const best = empty.sort(([nr1, nc1], [nr2, nc2]) => {
+      const n1 = [[nr1-1,nc1],[nr1+1,nc1],[nr1,nc1-1],[nr1,nc1+1]].filter(([a,b])=>activeCells[`${a},${b}`]).length;
+      const n2 = [[nr2-1,nc2],[nr2+1,nc2],[nr2,nc2-1],[nr2,nc2+1]].filter(([a,b])=>activeCells[`${a},${b}`]).length;
+      return n1 - n2;
+    })[0];
+    return faceMap[`${best[0]},${best[1]}`] ?? 0;
+  };
+
+  const SNAP_DIRS = [null, 'n', 'e', 's', 'w']; // null = center
+  const snapIcon = { null: '·', n: '↑', e: '→', s: '↓', w: '←' };
+
+  const cycleSnap = (e, r, c) => {
+    e.stopPropagation();
+    setCells((prev) => {
+      const key = `${r},${c}`;
+      if (!prev[key]) return prev;
+      const cur = prev[key].snap ?? null;
+      const idx = SNAP_DIRS.indexOf(cur);
+      const next = SNAP_DIRS[(idx + 1) % SNAP_DIRS.length];
+      return { ...prev, [key]: { ...prev[key], snap: next } };
+    });
+  };
+
+  const toggleCell = (r, c) => {
+    setCells((prev) => {
+      const key = `${r},${c}`;
+      const next = { ...prev };
+      if (next[key]?.active) {
+        delete next[key];
+      } else {
+        next[key] = { active: true, rotY: autoRotate(r, c, prev) };
+      }
+      return next;
+    });
+  };
+
+  const rotateCell = (e, r, c) => {
+    e.stopPropagation();
+    setCells((prev) => {
+      const key = `${r},${c}`;
+      if (!prev[key]) return prev;
+      const cur = prev[key].rotY || 0;
+      const idx = ARROW_DIRS.findIndex((d) => Math.abs(d - cur) < 0.01);
+      const next = ARROW_DIRS[(idx + 1) % ARROW_DIRS.length];
+      return { ...prev, [key]: { ...prev[key], rotY: next } };
+    });
+  };
+
+  // cell effective size based on rotation
+  const cellSize = (rotY) => {
+    const isRotated90 = Math.abs(Math.abs(rotY) - Math.PI / 2) < 0.01;
+    return isRotated90
+      ? { x: modelD, z: modelW }  // swapped when 90/270
+      : { x: modelW, z: modelD };
+  };
+
+  // row offsets: { rowIndex: offsetMultiplier } — 0, 0.5, 1
+  const [rowOffsets, setRowOffsets] = React.useState({});
+  const [colOffsets, setColOffsets] = React.useState({});
+
+  const cycleOffset = (idx, map, setMap) => {
+    setMap((prev) => {
+      const cur = prev[idx] || 0;
+      const next = cur >= 1 ? 0 : cur + 0.5;
+      return { ...prev, [idx]: next };
+    });
+  };
+
+  const activeCells = Object.entries(cells).filter(([, v]) => v.active);
+
+  const handlePlace = () => {
+    if (!selectedDef || !activeCells.length) return;
+    const groupId = `island_${Date.now()}`;
+    const color = catalogColors[selectedDef.id] || selectedDef.color || "#888888";
+
+    // compute cumulative X positions per column based on max width in each col
+    const colWidths = {};
+    for (let c = 0; c < cols; c++) {
+      let maxW = 0;
+      for (let r = 0; r < rows; r++) {
+        const cell = cells[`${r},${c}`];
+        if (cell?.active) {
+          const sz = cellSize(cell.rotY);
+          maxW = Math.max(maxW, sz.x);
+        }
+      }
+      colWidths[c] = maxW; // 0 if no active cells in this column
+    }
+
+    // compute cumulative Z positions per row
+    const rowDepths = {};
+    for (let r = 0; r < rows; r++) {
+      let maxD = 0;
+      for (let c = 0; c < cols; c++) {
+        const cell = cells[`${r},${c}`];
+        if (cell?.active) {
+          const sz = cellSize(cell.rotY);
+          maxD = Math.max(maxD, sz.z);
+        }
+      }
+      rowDepths[r] = maxD; // 0 if no active cells in this row
+    }
+
+    // cumulative positions
+    const colX = {};
+    let accX = 0;
+    for (let c = 0; c < cols; c++) {
+      colX[c] = accX + colWidths[c] / 2;
+      accX += colWidths[c];
+    }
+    const rowZ = {};
+    let accZ = 0;
+    for (let r = 0; r < rows; r++) {
+      rowZ[r] = accZ + rowDepths[r] / 2;
+      accZ += rowDepths[r];
+    }
+
+    // build items — regular cells + intersection points
+    const newItems = activeCells.map(([key, cell], idx) => {
+      let wx, wz;
+      if (cell.isIntersection) {
+        // intersection point: ri,ci in the interleaved grid
+        const { ri, ci } = cell;
+        const r = (ri - 1) / 2; // row above
+        const c = (ci - 1) / 2; // col to the left (if ci is odd)
+        const isInterRow = ri % 2 === 1;
+        const isInterCol = ci % 2 === 1;
+        // X: midpoint between col c and col c+1 (if inter-col), else col center
+        if (isInterCol) {
+          const x1 = colX[c] !== undefined ? colX[c] + (colWidths[c] || 0) / 2 : 0;
+          const x2 = colX[c+1] !== undefined ? colX[c+1] - (colWidths[c+1] || 0) / 2 : x1;
+          wx = (x1 + x2) / 2;
+        } else {
+          wx = colX[Math.floor(ci / 2)] || 0;
+        }
+        // Z: midpoint between row r and row r+1 (if inter-row), else row center
+        if (isInterRow) {
+          const z1 = rowZ[r] !== undefined ? rowZ[r] + (rowDepths[r] || 0) / 2 : 0;
+          const z2 = rowZ[r+1] !== undefined ? rowZ[r+1] - (rowDepths[r+1] || 0) / 2 : z1;
+          wz = (z1 + z2) / 2;
+        } else {
+          wz = rowZ[Math.floor(ri / 2)] || 0;
+        }
+      } else {
+        const [row, col] = key.split(",").map(Number);
+        const sz = cellSize(cell.rotY);
+        const xOffset = (colOffsets[col] || 0) * (rowDepths[row] || modelD);
+        const zOffset = (rowOffsets[row] || 0) * (colWidths[col] || modelW);
+        const snap = cell.snap ?? null;
+        const cellW = colWidths[col] || sz.x;
+        const cellD = rowDepths[row] || sz.z;
+        const snapX = snap === 'w' ? -(cellW - sz.x) / 2 : snap === 'e' ? (cellW - sz.x) / 2 : 0;
+        const snapZ = snap === 'n' ? -(cellD - sz.z) / 2 : snap === 's' ? (cellD - sz.z) / 2 : 0;
+        wx = colX[col] + xOffset + snapX;
+        wz = rowZ[row] + zOffset + snapZ;
+      }
+      return {
+        uid: `${selectedDef.id}_island_${Date.now()}_${idx}`,
+        catalogId: selectedDef.id,
+        kind: "model",
+        x: wx,
+        z: wz,
+        rotY: cell.rotY,
+        color: varyColor(color, idx),
+        sockets: {},
+        groupIds: [groupId],
+        pivotX: accX / 2,
+        pivotZ: accZ / 2,
+      };
+    });
+
+    // center on origin
+    const cx = accX / 2;
+    const cz = accZ / 2;
+    const centered = newItems.map((it) => ({
+      ...it,
+      x: it.x - cx,
+      z: it.z - cz,
+      pivotX: 0,
+      pivotZ: 0,
+    }));
+
+    onPlace(centered);
+  };
+
+  // Arrow SVG for cell direction indicator
+  const ArrowSvg = ({ rotY, size = 18 }) => {
+    const deg = (rotY * 180 / Math.PI);
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#00e5ff" strokeWidth="2.5"
+        style={{ transform: `rotate(${deg}deg)`, pointerEvents: "none" }}>
+        <line x1="12" y1="19" x2="12" y2="5"/>
+        <polyline points="5 12 12 5 19 12"/>
+      </svg>
+    );
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 2000, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div style={{ background: "#0d1117", border: "1px solid #1e2035", borderRadius: 16, padding: 28, width: "min(96vw, 680px)", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 20 }}>
+
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 3, height: 22, background: "#5b4bff", borderRadius: 2 }} />
+            <h2 style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0", margin: 0 }}>Island Builder</h2>
+          </div>
+          <button onClick={onCancel} style={{ background: "none", border: "none", color: "#64748b", fontSize: 20, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+
+        {/* Model selector */}
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Model</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {catalog.map((c) => (
+              <button key={c.id} onClick={() => setSelectedModelId(c.id)}
+                style={{ padding: "6px 12px", borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: "pointer", border: `1px solid ${selectedModelId === c.id ? "#5b4bff" : "#1e2035"}`, background: selectedModelId === c.id ? "#5b4bff" : "#13162a", color: selectedModelId === c.id ? "#fff" : "#94a3b8" }}>
+                {c.name}
+              </button>
+            ))}
+          </div>
+          {selectedDef && (
+            <div style={{ fontSize: 10, color: "#475569", marginTop: 6 }}>
+              {loadingDims
+                ? <span style={{ color: "#5b4bff" }}>Measuring model…</span>
+                : <>{fmt(metersTo(modelW, unit))}{UNITS[unit].label} × {fmt(metersTo(modelD, unit))}{UNITS[unit].label} × {fmt(metersTo(selectedDef.h, unit))}{UNITS[unit].label}{realDims ? " (actual)" : " (manifest)"}</>
+              }
+            </div>
+          )}
+        </div>
+
+        {/* Grid size controls */}
+        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase" }}>Grid size</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, color: "#94a3b8" }}>Cols</span>
+            <button onClick={() => { setCols((c) => Math.max(1, c - 1)); setCells({}); setColOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>−</button>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", minWidth: 20, textAlign: "center" }}>{cols}</span>
+            <button onClick={() => { setCols((c) => Math.min(8, c + 1)); setCells({}); setColOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>+</button>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, color: "#94a3b8" }}>Rows</span>
+            <button onClick={() => { setRows((r) => Math.max(1, r - 1)); setCells({}); setRowOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>−</button>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", minWidth: 20, textAlign: "center" }}>{rows}</span>
+            <button onClick={() => { setRows((r) => Math.min(8, r + 1)); setCells({}); setRowOffsets({}); }} style={{ width: 22, height: 22, borderRadius: 5, background: "#1e2035", border: "1px solid #2a2f4a", color: "#e2e8f0", cursor: "pointer", fontSize: 13 }}>+</button>
+          </div>
+          <button onClick={() => { setCells({}); setRowOffsets({}); setColOffsets({}); }} style={{ marginLeft: "auto", fontSize: 10, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontWeight: 600 }}>Clear</button>
+        </div>
+
+        {/* Grid */}
+        <div style={{ alignSelf: "center", overflowX: "auto" }}>
+          {/* Col offset buttons */}
+          <div style={{ display: "flex", gap: 3, marginBottom: 3, marginLeft: 26 }}>
+            {Array.from({ length: cols }, (_, c) => {
+              const off = colOffsets[c] || 0;
+              return (
+                <div key={c} style={{ width: CELL_PX, display: "flex", justifyContent: "center" }}>
+                  <button onClick={() => cycleOffset(c, colOffsets, setColOffsets)}
+                    title="Cycle column offset: 0 → ½ → 1"
+                    style={{ fontSize: 9, fontWeight: 700, background: off ? "#2a1f5a" : "#13162a", border: `1px solid ${off ? "#5b4bff" : "#1e2035"}`, borderRadius: 4, color: off ? "#a5b4fc" : "#334155", cursor: "pointer", padding: "2px 5px", minWidth: 22 }}>
+                    {off === 0 ? "·" : off === 0.5 ? "½" : "1"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "flex", gap: 3 }}>
+            {/* Row offset buttons */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {Array.from({ length: rows }, (_, r) => {
+                const off = rowOffsets[r] || 0;
+                return (
+                  <div key={r} style={{ height: CELL_PX, display: "flex", alignItems: "center" }}>
+                    <button onClick={() => cycleOffset(r, rowOffsets, setRowOffsets)}
+                      title="Cycle row offset: 0 → ½ → 1"
+                      style={{ fontSize: 9, fontWeight: 700, background: off ? "#2a1f5a" : "#13162a", border: `1px solid ${off ? "#5b4bff" : "#1e2035"}`, borderRadius: 4, color: off ? "#a5b4fc" : "#334155", cursor: "pointer", padding: "2px 4px", minWidth: 18 }}>
+                      {off === 0 ? "·" : off === 0.5 ? "½" : "1"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Cells + intersection points */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {Array.from({ length: rows * 2 - 1 }, (_, ri) => {
+                const isInterRow = ri % 2 === 1; // odd = between rows
+                const r = Math.floor(ri / 2);
+                return (
+                  <div key={ri} style={{ display: "flex", gap: 3, alignItems: "center" }}>
+                    {Array.from({ length: cols * 2 - 1 }, (_, ci) => {
+                      const isInterCol = ci % 2 === 1; // odd = between cols
+                      const c = Math.floor(ci / 2);
+
+                      // intersection point
+                      if (isInterRow || isInterCol) {
+                        const ikey = `i_${ri}_${ci}`;
+                        const iactive = cells[ikey]?.active;
+                        const irotY = cells[ikey]?.rotY || 0;
+                        const size = isInterRow && isInterCol ? 10 : 14;
+                        return (
+                          <div key={ci}
+                            style={{ width: isInterCol ? 14 : CELL_PX, height: isInterRow ? 14 : CELL_PX, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                            {(isInterRow && isInterCol) ? null : (
+                              <button onClick={() => setCells((prev) => {
+                                const existing = prev[ikey];
+                                if (existing?.active) {
+                                  // rotate if already active
+                                  const cur = existing.rotY || 0;
+                                  const idx = ARROW_DIRS.findIndex(d => Math.abs(d - cur) < 0.01);
+                                  return { ...prev, [ikey]: { ...existing, rotY: ARROW_DIRS[(idx + 1) % ARROW_DIRS.length] } };
+                                }
+                                return { ...prev, [ikey]: { active: true, rotY: 0, snap: null, isIntersection: true, ri, ci } };
+                              })}
+                              onContextMenu={(e) => { e.preventDefault(); setCells((prev) => { const existing = prev[ikey]; if (!existing?.active) return prev; return { ...prev, [ikey]: { ...existing, active: false } }; }); }}
+                                style={{
+                                  width: size, height: size, borderRadius: '50%', padding: 0, cursor: 'pointer',
+                                  background: iactive ? '#5b4bff' : '#1e2035',
+                                  border: `2px solid ${iactive ? '#7c6dff' : '#2a3060'}`,
+                                  position: 'relative', flexShrink: 0,
+                                }}>
+                                {iactive && (
+                                  <div style={{ position: 'absolute', inset: -20, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                                    <ArrowSvg rotY={irotY} size={12} />
+                                  </div>
+                                )}
+                              </button>
+                            )}
+                            {iactive && !isInterRow && !isInterCol && (
+                              <button onClick={(e) => { e.stopPropagation(); setCells((prev) => {
+                                const cur = prev[ikey]?.rotY || 0;
+                                const idx = ARROW_DIRS.indexOf(ARROW_DIRS.find(d => Math.abs(d - cur) < 0.01));
+                                return { ...prev, [ikey]: { ...prev[ikey], rotY: ARROW_DIRS[(idx + 1) % ARROW_DIRS.length] } };
+                              }); }}
+                                style={{ position: 'absolute', bottom: 1, right: 1, width: 10, height: 10, borderRadius: 2, background: '#5b4bff', border: 'none', color: '#fff', fontSize: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>↻</button>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      // regular cell
+                      const key = `${r},${c}`;
+                      const cell = cells[key];
+                      const active = cell?.active;
+                      const rotY = cell?.rotY || 0;
+                      return (
+                        <div key={ci} onClick={() => toggleCell(r, c)}
+                          style={{
+                            width: CELL_PX, height: CELL_PX, borderRadius: 8, cursor: "pointer",
+                            background: active ? "#1a2a4a" : "#13162a",
+                            border: `2px solid ${active ? "#5b4bff" : "#1e2035"}`,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            position: "relative", transition: "background 0.1s, border 0.1s", flexShrink: 0,
+                          }}>
+                          {active && (
+                            <>
+                              <ArrowSvg rotY={rotY} size={22} />
+                              {[
+                                ['n', { top: 2, left: '50%', transform: 'translateX(-50%)' }],
+                                ['s', { bottom: 2, left: '50%', transform: 'translateX(-50%)' }],
+                                ['w', { left: 2, top: '50%', transform: 'translateY(-50%)' }],
+                                ['e', { right: 2, top: '50%', transform: 'translateY(-50%)' }],
+                              ].map(([dir, pos]) => (
+                                <button key={dir} onClick={(e) => { e.stopPropagation(); setCells((prev) => { const k = `${r},${c}`; if (!prev[k]) return prev; const cur = prev[k].snap; return { ...prev, [k]: { ...prev[k], snap: cur === dir ? null : dir } }; }); }}
+                                  style={{ position: 'absolute', ...pos, width: 8, height: 8, borderRadius: '50%', padding: 0, background: cell?.snap === dir ? '#00e5ff' : '#1e2035', border: `1px solid ${cell?.snap === dir ? '#00e5ff' : '#2a3060'}`, cursor: 'pointer' }} />
+                              ))}
+                              <button onClick={(e) => rotateCell(e, r, c)}
+                                style={{ position: "absolute", bottom: 3, right: 3, width: 15, height: 15, borderRadius: 3, background: "#5b4bff", border: "none", color: "#fff", fontSize: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, lineHeight: 1 }}>↻</button>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Legend */}
+        <div style={{ fontSize: 10, color: "#475569", textAlign: "center" }}>
+          Click cell to toggle · ↻ rotate · dots = snap · points between cells = half position
+        </div>
+
+        {/* Preview */}
+        {activeCells.length > 0 && (() => {
+          const PREV_W = 320, PREV_H = 180, PAD = 20;
+          const colWidths = {};
+          for (let c = 0; c < cols; c++) {
+            let maxW = 0;
+            for (let r = 0; r < rows; r++) {
+              const cell = cells[`${r},${c}`];
+              if (cell?.active) { const sz = cellSize(cell.rotY); maxW = Math.max(maxW, sz.x); }
+            }
+            colWidths[c] = maxW;
+          }
+          const rowDepths = {};
+          for (let r = 0; r < rows; r++) {
+            let maxD = 0;
+            for (let c = 0; c < cols; c++) {
+              const cell = cells[`${r},${c}`];
+              if (cell?.active) { const sz = cellSize(cell.rotY); maxD = Math.max(maxD, sz.z); }
+            }
+            rowDepths[r] = maxD;
+          }
+          const colX = {}; let accX = 0;
+          for (let c = 0; c < cols; c++) { colX[c] = accX + colWidths[c] / 2; accX += colWidths[c]; }
+          const rowZ = {}; let accZ = 0;
+          for (let r = 0; r < rows; r++) { rowZ[r] = accZ + rowDepths[r] / 2; accZ += rowDepths[r]; }
+          const cx = accX / 2, cz = accZ / 2;
+
+          // centered rects (matching handlePlace output)
+          const rects = activeCells.map(([key, cell]) => {
+            let wx, wz;
+            if (cell.isIntersection) {
+              const { ri, ci } = cell;
+              const r = (ri - 1) / 2;
+              const c = (ci - 1) / 2;
+              const isInterRow = ri % 2 === 1;
+              const isInterCol = ci % 2 === 1;
+              if (isInterCol) {
+                const x1 = colX[c] !== undefined ? colX[c] + (colWidths[c] || 0) / 2 : 0;
+                const x2 = colX[c+1] !== undefined ? colX[c+1] - (colWidths[c+1] || 0) / 2 : x1;
+                wx = (x1 + x2) / 2;
+              } else { wx = colX[Math.floor(ci / 2)] || 0; }
+              if (isInterRow) {
+                const z1 = rowZ[r] !== undefined ? rowZ[r] + (rowDepths[r] || 0) / 2 : 0;
+                const z2 = rowZ[r+1] !== undefined ? rowZ[r+1] - (rowDepths[r+1] || 0) / 2 : z1;
+                wz = (z1 + z2) / 2;
+              } else { wz = rowZ[Math.floor(ri / 2)] || 0; }
+            } else {
+              const [row, col] = key.split(",").map(Number);
+              const sz = cellSize(cell.rotY);
+              const cellW = colWidths[col] || sz.x;
+              const cellD = rowDepths[row] || sz.z;
+              const snapX = cell.snap === 'w' ? -(cellW - sz.x) / 2 : cell.snap === 'e' ? (cellW - sz.x) / 2 : 0;
+              const snapZ = cell.snap === 'n' ? -(cellD - sz.z) / 2 : cell.snap === 's' ? (cellD - sz.z) / 2 : 0;
+              wx = colX[col] + snapX - cx;
+              wz = rowZ[row] + snapZ - cz;
+            }
+            const sz = cellSize(cell.rotY);
+            return { x: cell.isIntersection ? wx - cx : wx, z: cell.isIntersection ? wz - cz : wz, w: sz.x, d: sz.z, rotY: cell.rotY };
+          });
+
+          // bounding box of centered rects
+          const xs1 = rects.map(r => r.x - r.w/2), xs2 = rects.map(r => r.x + r.w/2);
+          const zs1 = rects.map(r => r.z - r.d/2), zs2 = rects.map(r => r.z + r.d/2);
+          const minX = Math.min(...xs1), maxX = Math.max(...xs2);
+          const minZ = Math.min(...zs1), maxZ = Math.max(...zs2);
+          const spanX = (maxX - minX) || 1, spanZ = (maxZ - minZ) || 1;
+
+          // fit to preview with padding
+          const scale = Math.min((PREV_W - PAD * 2) / spanX, (PREV_H - PAD * 2) / spanZ);
+          const midX = (minX + maxX) / 2, midZ = (minZ + maxZ) / 2;
+          const toSx = (x) => PREV_W / 2 + (x - midX) * scale;
+          const toSz = (z) => PREV_H / 2 + (z - midZ) * scale;
+
+          return (
+            <div style={{ background: "#0d0f18", border: "1px solid #1e2035", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ fontSize: 9, color: "#334155", padding: "6px 10px 0", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Preview</div>
+              <svg width={PREV_W} height={PREV_H} style={{ display: "block" }}>
+                <defs><clipPath id="pc"><rect x="0" y="0" width={PREV_W} height={PREV_H}/></clipPath></defs>
+                <g clipPath="url(#pc)">
+                  {rects.map((rect, i) => {
+                    const sx = toSx(rect.x), sz = toSz(rect.z);
+                    const rw = rect.w * scale, rd = rect.d * scale;
+                    const aLen = Math.min(rw, rd) * 0.38;
+                    const ax = Math.sin(rect.rotY) * aLen;
+                    const az = Math.cos(rect.rotY) * aLen;
+                    return (
+                      <g key={i}>
+                        <rect x={sx - rw/2} y={sz - rd/2} width={rw} height={rd}
+                          fill="#1a2a4a" stroke="#5b4bff" strokeWidth="1.5" rx="2"/>
+                        <line x1={sx} y1={sz} x2={sx - ax} y2={sz - az}
+                          stroke="#00e5ff" strokeWidth="1.5" strokeLinecap="round"/>
+                        <circle cx={sx - ax} cy={sz - az} r="2.5" fill="#00e5ff"/>
+                      </g>
+                    );
+                  })}
+                </g>
+              </svg>
+            </div>
+          );
+        })()}
+
+        {/* Footer */}
+        <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+          <button onClick={onCancel}
+            style={{ flex: 1, background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, color: "#94a3b8", padding: "11px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>
+            Cancel
+          </button>
+          <button onClick={handlePlace} disabled={!activeCells.length || !selectedDef || loadingDims}
+            style={{ flex: 2, background: activeCells.length && selectedDef && !loadingDims ? "linear-gradient(135deg, #5b4bff, #7c6dff)" : "#1e2035", border: "none", borderRadius: 10, color: activeCells.length && selectedDef && !loadingDims ? "#fff" : "#475569", padding: "11px", fontSize: 13, cursor: activeCells.length && selectedDef && !loadingDims ? "pointer" : "default", fontWeight: 700 }}>
+            {loadingDims ? "Measuring…" : `Place ${activeCells.length > 0 ? `${activeCells.length} objects` : ""}`}
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
 function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirmDimensions, onCancel, unit, UNITS, toMeters, fmt, metersTo }) {
   const canvasRef = React.useRef(null);
   const [localUnit, setLocalUnit] = React.useState(unit);
@@ -4815,11 +5591,10 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
     const image = new Image();
     image.onload = () => {
       setImg(image);
-      // calcular zoom y pan para que la imagen quepa centrada en el canvas (800x500)
-      const canvasW = 800, canvasH = 500;
-      const scaleToFit = Math.min(canvasW / image.naturalWidth, canvasH / image.naturalHeight) * 0.9;
-      setZoom(scaleToFit);
-      setPan({ x: (canvasW - image.naturalWidth * scaleToFit) / 2, y: (canvasH - image.naturalHeight * scaleToFit) / 2 });
+      const iW = image.naturalWidth, iH = image.naturalHeight;
+      const scaleToFit = Math.min(iW / iW, iH / iH) * 0.9; // start at 90% zoom
+      setZoom(0.9);
+      setPan({ x: iW * 0.05, y: iH * 0.05 });
     };
     image.src = modal.dataUrl;
   }, [modal?.dataUrl]);
@@ -4833,18 +5608,29 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
     ctx.translate(pan.x, pan.y);
     ctx.scale(zoom, zoom);
     ctx.drawImage(img, 0, 0);
+    // marker size fixed at ~10 screen pixels regardless of image resolution or zoom
+    const canvas = el;
+    const rect = canvas.getBoundingClientRect();
+    const screenToCanvas = canvas.width / rect.width; // image pixels per screen pixel
+    const markerR = 10 * screenToCanvas / zoom;
+    const lineW = 2 * screenToCanvas / zoom;
     const pts = modal.step === 'calibrate' ? points : outlinePoints;
-    ctx.strokeStyle = "#00e5ff"; ctx.fillStyle = "#00e5ff"; ctx.lineWidth = 2 / zoom;
+    ctx.strokeStyle = "#00e5ff"; ctx.fillStyle = "#00e5ff"; ctx.lineWidth = lineW;
     pts.forEach((p, i) => {
-      ctx.beginPath(); ctx.arc(p.x, p.y, 6 / zoom, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(p.x, p.y, markerR, 0, Math.PI * 2); ctx.fill();
+      // white border around dot for visibility on any background
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = lineW * 0.8;
+      ctx.beginPath(); ctx.arc(p.x, p.y, markerR, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = lineW;
       if (i > 0) { ctx.beginPath(); ctx.moveTo(pts[i-1].x, pts[i-1].y); ctx.lineTo(p.x, p.y); ctx.stroke(); }
     });
     if (modal.step === 'calibrate' && points.length === 2) {
-      ctx.fillStyle = "#fff"; ctx.font = `${14/zoom}px sans-serif`;
-      ctx.fillText(`${distance} ${UNITS[unit].label}`, (points[0].x + points[1].x)/2, (points[0].y + points[1].y)/2 - 8/zoom);
+      ctx.fillStyle = "#fff"; ctx.font = `bold ${16/zoom}px sans-serif`;
+      ctx.fillText(`${distance} ${UNITS[unit].label}`, (points[0].x + points[1].x)/2, (points[0].y + points[1].y)/2 - markerR * 1.5);
     }
     if (modal.step === 'outline' && outlinePoints.length > 2) {
-      ctx.strokeStyle = "#c4622d"; ctx.beginPath();
+      ctx.strokeStyle = "#c4622d"; ctx.lineWidth = lineW;
+      ctx.beginPath();
       ctx.moveTo(outlinePoints[0].x, outlinePoints[0].y);
       outlinePoints.forEach((p) => ctx.lineTo(p.x, p.y));
       ctx.closePath(); ctx.stroke();
@@ -4883,9 +5669,22 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
       setPan((p) => ({ x: p.x - normX * 0.5, y: p.y - normY * 0.5 }));
       return;
     }
-    // zoom normalizado
+    // zoom toward cursor
     const factor = normY > 0 ? 0.92 : 1.09;
-    setZoom((z) => Math.min(Math.max(z * factor, 0.2), 8));
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const mouseY = (e.clientY - rect.top) * scaleY;
+    setZoom((z) => {
+      const newZ = Math.min(Math.max(z * factor, 0.1), 10);
+      setPan((p) => ({
+        x: mouseX - (mouseX - p.x) * (newZ / z),
+        y: mouseY - (mouseY - p.y) * (newZ / z),
+      }));
+      return newZ;
+    });
   };
 
   const handleMouseDown = (e) => { if (e.button === 1 || e.button === 2) { isPanning.current = true; lastPan.current = { x: e.clientX, y: e.clientY }; } };
@@ -4916,7 +5715,12 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
 
   if (!modal) return null;
   const W = img ? img.naturalWidth : 800;
-  const H = img ? img.naturalHeight : 600;
+  const H = img ? img.naturalHeight : 500;
+  // fit canvas visually to container while keeping exact pixel ratio
+  const MAX_W = 860, MAX_H = 520;
+  const scale = Math.min(MAX_W / W, MAX_H / H);
+  const displayW = Math.round(W * scale);
+  const displayH = Math.round(H * scale);
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.85)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
@@ -4934,14 +5738,14 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
         </p>
 
         {/* Canvas */}
-        <div style={{ flex: 1, overflow: "hidden", border: "1px solid #33363d", borderRadius: 8, cursor: "crosshair", minHeight: 400, position: "relative" }}
+        <div style={{ overflow: "hidden", border: "1px solid #33363d", borderRadius: 8, cursor: "crosshair", position: "relative", alignSelf: "center" }}
           onWheel={handleWheel}
           onMouseDown={(e) => { handleCanvasClick(e); handleMouseDown(e); }}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onContextMenu={(e) => e.preventDefault()}
         >
-          <canvas ref={canvasRef} width={800} height={500} style={{ width: "100%", height: "100%", display: "block" }} />
+          <canvas ref={canvasRef} width={W} height={H} style={{ width: displayW, height: displayH, display: "block" }} />
         </div>
 
         {/* Controls */}
@@ -5087,17 +5891,17 @@ function ConfirmDimensionsStep({ modal, onConfirm, unit, UNITS, fmt, metersTo, t
         <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Width ({unitLabel})</div>
-            <input type="number" min="0.1" step="0.1"
+            <input type="number" min="0.01" step="0.1"
               value={fmt(metersTo(w, localUnit))}
-              onChange={(e) => setW(toMeters(parseFloat(e.target.value) || 0.1, localUnit))}
+              onChange={(e) => setW(toMeters(parseFloat(e.target.value) || 0, localUnit))}
               style={{ width: "100%", background: "#0d0f18", border: "1px solid #5b4bff", borderRadius: 8, color: "#e2e8f0", padding: "10px 12px", fontSize: 16, fontWeight: 600, textAlign: "center", boxSizing: "border-box" }} />
           </div>
           <div style={{ display: "flex", alignItems: "flex-end", paddingBottom: 10, color: "#475569", fontSize: 20 }}>×</div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Depth ({unitLabel})</div>
-            <input type="number" min="0.1" step="0.1"
+            <input type="number" min="0.01" step="0.1"
               value={fmt(metersTo(d, localUnit))}
-              onChange={(e) => setD(toMeters(parseFloat(e.target.value) || 0.1, localUnit))}
+              onChange={(e) => setD(toMeters(parseFloat(e.target.value) || 0, localUnit))}
               style={{ width: "100%", background: "#0d0f18", border: "1px solid #5b4bff", borderRadius: 8, color: "#e2e8f0", padding: "10px 12px", fontSize: 16, fontWeight: 600, textAlign: "center", boxSizing: "border-box" }} />
           </div>
         </div>
