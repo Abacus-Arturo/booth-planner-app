@@ -53,6 +53,95 @@ function getSocketName(s) { return typeof s === "string" ? s : s.name; }
 function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
 
 function buildWallMesh(wall, allWalls = []) {
+  // Door
+  if (wall.type === "door") {
+    const t = wall.thickness || 0.1;
+    const dw = wall.width || 0.9;
+    const dh = wall.height || 2.1;          // clear opening height
+    const wallH = wall.wallHeight || dh + 0.3; // full wall height above door
+    const openAngle = (wall.openAngle || 0) * Math.PI / 180;
+    const wdx = wall.x2 - wall.x1, wdz = wall.z2 - wall.z1;
+    const len = Math.sqrt(wdx * wdx + wdz * wdz) || 0.01;
+    const angle = Math.atan2(wdx, wdz) - Math.PI / 2;
+    const cx = (wall.x1 + wall.x2) / 2, cz = (wall.z1 + wall.z2) / 2;
+    const frameColor = wall.color || "#a07840";
+
+    const group = new THREE.Group();
+    group.position.set(cx, 0, cz);
+    group.rotation.y = angle;
+    group.userData.isWall = true;
+
+    const frameMat = new THREE.MeshStandardMaterial({ color: frameColor, roughness: 0.7, metalness: 0.1 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: wall.wallColor || "#cccccc", roughness: 0.8, metalness: 0.05 });
+
+    const jw = 0.05; // jamb width
+
+    // Left jamb — sits at the very edge of the opening, no overlap with neighbors
+    const ljGeo = new THREE.BoxGeometry(jw, dh, t);
+    const lj = new THREE.Mesh(ljGeo, frameMat);
+    lj.position.set(-len / 2 + jw / 2, dh / 2, 0);
+    lj.castShadow = true;
+    group.add(lj);
+
+    // Right jamb
+    const rj = new THREE.Mesh(ljGeo, frameMat);
+    rj.position.set(len / 2 - jw / 2, dh / 2, 0);
+    rj.castShadow = true;
+    group.add(rj);
+
+    // Lintel — exactly spans the opening, sits at dh
+    const lintelH = Math.max(0.05, wallH - dh);
+    const lintelGeo = new THREE.BoxGeometry(len, lintelH, t);
+    const lintel = new THREE.Mesh(lintelGeo, wallMat);
+    lintel.position.set(0, dh + lintelH / 2, 0);
+    lintel.castShadow = true;
+    group.add(lintel);
+
+    // Thin header trim on lintel bottom
+    const headerGeo = new THREE.BoxGeometry(len, 0.04, t);
+    const header = new THREE.Mesh(headerGeo, frameMat);
+    header.position.set(0, dh - 0.02, 0);
+    group.add(header);
+
+    // Door leaf — pivots from hinge side, flips inward/outward
+    if (dh > 0.1) {
+      const leafColor = wall.leafColor || "#c8a96e";
+      const doorMat = new THREE.MeshStandardMaterial({ color: leafColor, roughness: 0.5, metalness: 0.05 });
+      const leafGeo = new THREE.BoxGeometry(dw, dh - 0.02, t * 0.5);
+      const leaf = new THREE.Mesh(leafGeo, doorMat);
+      leaf.castShadow = true;
+      const flip = wall.flipSide ? -1 : 1;      // 1 = inward, -1 = outward
+      const hingeRight = wall.hingeSide === 'right'; // default left
+      const pivot = new THREE.Group();
+      const hingeX = hingeRight ? len / 2 - jw : -len / 2 + jw;
+      pivot.position.set(hingeX, 0, 0);
+      // leaf extends away from hinge
+      leaf.position.set((hingeRight ? -1 : 1) * dw / 2, dh / 2, 0);
+      pivot.rotation.y = flip * openAngle * (hingeRight ? -1 : 1);
+      pivot.add(leaf);
+
+      // Handle — knob + backplate on both faces
+      const handleMat = new THREE.MeshStandardMaterial({ color: "#b8a060", roughness: 0.3, metalness: 0.8 });
+      const knobGeo = new THREE.SphereGeometry(0.025, 12, 12);
+      const barGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.1, 8);
+      const handleOffset = (hingeRight ? -1 : 1) * (dw - 0.12); // near far edge from hinge
+      const handleY = dh * 0.45;
+      [-1, 1].forEach(side => {
+        const knob = new THREE.Mesh(knobGeo, handleMat);
+        knob.position.set(handleOffset, handleY, side * (t * 0.28));
+        pivot.add(knob);
+        const bar = new THREE.Mesh(barGeo, handleMat);
+        bar.rotation.z = Math.PI / 2;
+        bar.position.set(handleOffset, handleY, side * (t * 0.28 + 0.05));
+        pivot.add(bar);
+      });
+
+      group.add(pivot);
+    }
+
+    return group;
+  }
+
   // Column
   if (wall.type === "column") {
     const group = new THREE.Group();
@@ -78,12 +167,13 @@ function buildWallMesh(wall, allWalls = []) {
   const snapDist = t * 1.5;
   const otherWalls = allWalls.filter(w => w.uid !== wall.uid && w.type !== 'column');
 
-  const ptConnects = (px, pz) => otherWalls.some(w =>
-    Math.hypot(w.x1-px, w.z1-pz) < snapDist || Math.hypot(w.x2-px, w.z2-pz) < snapDist
-  );
+  const ptConnects = (px, pz) => otherWalls.some(w => {
+    if (w.type === 'door') return false; // never miter into a door opening
+    return Math.hypot(w.x1-px, w.z1-pz) < snapDist || Math.hypot(w.x2-px, w.z2-pz) < snapDist;
+  });
 
-  const extStart = ptConnects(wall.x1, wall.z1) ? t / 2 : 0;
-  const extEnd = ptConnects(wall.x2, wall.z2) ? t / 2 : 0;
+  const extStart = (!wall.noMiterStart && ptConnects(wall.x1, wall.z1)) ? t / 2 : 0;
+  const extEnd   = (!wall.noMiterEnd   && ptConnects(wall.x2, wall.z2)) ? t / 2 : 0;
 
   const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
   const len = Math.sqrt(dx * dx + dz * dz) || 0.01;
@@ -570,7 +660,9 @@ export default function BoothPlannerV2() {
     next.has(id) ? next.delete(id) : next.add(id);
     return next;
   });
-  const wallStateRef = useRef({ active: false, start: null, end: null });
+  const wallStateRef = useRef({ active: false, start: null, end: null, lockedAngle: null });
+  const shiftKeyRef = useRef(false); // reliable shift tracking via keydown/keyup
+  const altKeyRef = useRef(false);
   // tracks which nesting level the user is currently "inside" for click selection
   // -1 = outermost (last groupIds index), going down toward 0 (innermost) on dblclick
   const selectionDepthRef = useRef(null); // null = not in a group context
@@ -1427,6 +1519,8 @@ export default function BoothPlannerV2() {
       return new THREE.Vector3(start.x + Math.sin(snapped) * len, 0, start.z + Math.cos(snapped) * len);
     };
     const onMoveDrag = (e) => {
+      shiftKeyRef.current = e.shiftKey;
+      altKeyRef.current = e.altKey;
       // ---- Hover highlight ----
       if (!draggingUid && !draggingWallUid && !draggingWallHandleRef.current) {
         const rect = dom.getBoundingClientRect();
@@ -1632,8 +1726,32 @@ export default function BoothPlannerV2() {
           snapIndicator.visible = false;
         } else {
           // después del primer click: mover el endpoint con snap de posición + ángulo
-          const { pt: posSnapped, snapped: didSnap } = snapWallPoint(raw, e.shiftKey, wallsRef.current, floorWRef.current, floorDRef.current);
-          ws.end = e.altKey ? posSnapped : snapLineEnd(ws.start, posSnapped, false);
+          const { pt: posSnapped, snapped: didSnap } = snapWallPoint(raw, false, wallsRef.current, floorWRef.current, floorDRef.current);
+          const isShift = e.shiftKey || shiftKeyRef.current;
+          const isAlt = e.altKey || altKeyRef.current;
+          if (isAlt) {
+            ws.lockedAngle = null;
+            ws.end = posSnapped;
+          } else if (isShift) {
+            // Lock angle: capture it the moment Shift is first pressed, then only vary length
+            if (ws.lockedAngle === null) {
+              const cur = new THREE.Vector3().subVectors(ws.end, ws.start);
+              const curLen = cur.length();
+              if (curLen > 0.001) {
+                const curAngle = Math.atan2(cur.x, cur.z);
+                ws.lockedAngle = Math.round(curAngle / SNAP_STEP) * SNAP_STEP;
+              } else {
+                ws.lockedAngle = 0;
+              }
+            }
+            const a = ws.lockedAngle;
+            const dir = new THREE.Vector3().subVectors(raw, ws.start);
+            const len = Math.max(0.01, dir.x * Math.sin(a) + dir.z * Math.cos(a));
+            ws.end = new THREE.Vector3(ws.start.x + Math.sin(a) * len, 0, ws.start.z + Math.cos(a) * len);
+          } else {
+            ws.lockedAngle = null;
+            ws.end = snapLineEnd(ws.start, posSnapped, false);
+          }
           snapIndicator.position.set(posSnapped.x, 0.01, posSnapped.z);
           snapIndicator.visible = didSnap;
           threeRef.current.updateWallGhost(ws.start, ws.end, wallConfigRef.current);
@@ -2842,6 +2960,8 @@ export default function BoothPlannerV2() {
   // ---------------- Rotación con flechas + borrar con Delete/Backspace (multi-selección) ----------------
   useEffect(() => {
     const onKeyDown = (e) => {
+      shiftKeyRef.current = e.shiftKey;
+      altKeyRef.current = e.altKey;
       // Delete/Backspace always works for walls/objects even if an input has focus,
       // UNLESS the user is actively typing in an input (has text selected or cursor inside)
       const inInput = e.target && e.target.tagName === "INPUT" && e.target.type !== "color" && e.target.type !== "range";
@@ -3042,7 +3162,12 @@ export default function BoothPlannerV2() {
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    const onKeyUp = (e) => {
+      shiftKeyRef.current = e.shiftKey;
+      altKeyRef.current = e.altKey;
+    };
+    window.addEventListener("keyup", onKeyUp);
+    return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
   }, [selectedUids, wallToolActive, selectedWallUid]);
 
   const itemCounts = React.useMemo(() => {
@@ -4002,7 +4127,7 @@ export default function BoothPlannerV2() {
           </button>
           {wallToolActive && (
             <div style={{ background: "#0f2a1e", border: "1px solid #1a4a30", borderRadius: 8, padding: "8px 10px", marginBottom: 10, fontSize: 10, color: "#86efac", lineHeight: 1.6 }}>
-              Click = set start · Move · Click = place · <b>Shift</b> = free pos · <b>Alt</b> = free angle · <b>Esc</b> = finish
+              Click = set start · Move · Click = place · <b>Shift</b> = lock angle · <b>Alt</b> = free angle · <b>Esc</b> = finish
             </div>
           )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
@@ -4139,7 +4264,13 @@ export default function BoothPlannerV2() {
             onMoveWall={(uid, patch) => setWalls((prev) => prev.map((w) => w.uid === uid ? { ...w, ...patch } : w))}
             onSelectUids={(uids) => { setSelectedUids(uids); setSelectedWallUid(null); }}
             onSelectWall={(uid) => { setSelectedWallUid(uid); setSelectedUids([]); }}
-            onAddWall={(wall) => setWalls((prev) => [...prev, wall])}
+            onAddWall={(wall) => {
+              if (wall.__removeUid) {
+                setWalls((prev) => prev.filter(w => w.uid !== wall.__removeUid));
+              } else {
+                setWalls((prev) => [...prev, wall]);
+              }
+            }}
             unit={unit}
             UNITS={UNITS}
             fmt={fmt}
@@ -4186,7 +4317,7 @@ export default function BoothPlannerV2() {
             title = "Wall tool"; color = "#5b4bff";
             hints = [
               { key: "Click", desc: "set point" },
-              { key: "Shift", desc: "free position" },
+              { key: "Shift", desc: "lock angle" },
               { key: "Alt", desc: "free angle" },
               { key: "Esc", desc: "finish" },
             ];
@@ -4398,6 +4529,67 @@ export default function BoothPlannerV2() {
         {selectedWallUid && !selectedItem ? (() => {
           const selWall = walls.find((w) => w.uid === selectedWallUid);
           if (!selWall) return null;
+          if (selWall.type === "door") return (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                <div style={{ width: 3, height: 20, background: "#f59e0b", borderRadius: 2 }} />
+                <h3 style={{ fontSize: 14, fontWeight: 700, margin: 0, color: "#e2e8f0" }}>Door Properties</h3>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Width ({UNITS[unit].label})</label>
+                  <input type="number" min="0.3" step="0.05" value={fmt(metersTo(selWall.width || 0.9, unit))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, width: toMeters(parseFloat(e.target.value) || 0.9, unit) } : w))}
+                    style={inputStyle} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Height ({UNITS[unit].label})</label>
+                  <input type="number" min="0.5" step="0.1" value={fmt(metersTo(selWall.height || 2.1, unit))}
+                    onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, height: toMeters(parseFloat(e.target.value) || 2.1, unit) } : w))}
+                    style={inputStyle} />
+                </div>
+              </div>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Open angle — {Math.round(selWall.openAngle ?? 45)}°</label>
+              <input type="range" min="0" max="180" step="5" value={selWall.openAngle ?? 45}
+                onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, openAngle: parseFloat(e.target.value) } : w))}
+                style={{ width: "100%", accentColor: "#f59e0b", marginBottom: 12 }} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Hinge</label>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {[["left", "◀ Left"], ["right", "Right ▶"]].map(([v, label]) => (
+                      <button key={v} onClick={() => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, hingeSide: v } : w))}
+                        style={{ flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: "pointer", border: `1px solid ${(selWall.hingeSide || "left") === v ? "#f59e0b" : "#1e2035"}`, background: (selWall.hingeSide || "left") === v ? "#f59e0b22" : "#0d0f18", color: (selWall.hingeSide || "left") === v ? "#f59e0b" : "#64748b" }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Swing</label>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {[[false, "↑ In"], [true, "↓ Out"]].map(([v, label]) => (
+                      <button key={String(v)} onClick={() => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, flipSide: v } : w))}
+                        style={{ flex: 1, padding: "5px 0", fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: "pointer", border: `1px solid ${!!selWall.flipSide === v ? "#f59e0b" : "#1e2035"}`, background: !!selWall.flipSide === v ? "#f59e0b22" : "#0d0f18", color: !!selWall.flipSide === v ? "#f59e0b" : "#64748b" }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <label style={{ fontSize: 10, color: "#64748b", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Frame Color</label>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+                <input type="color" value={selWall.color || "#a07840"}
+                  onChange={(e) => setWalls((prev) => prev.map((w) => w.uid === selectedWallUid ? { ...w, color: e.target.value } : w))}
+                  style={{ width: 36, height: 36, border: "1px solid #1e2035", borderRadius: 8, padding: 2, cursor: "pointer", background: "none", flexShrink: 0 }} />
+                <div style={{ flex: 1, height: 36, background: selWall.color || "#a07840", borderRadius: 8, border: "1px solid #1e2035" }} />
+              </div>
+              <button onClick={() => { setWalls((prev) => prev.filter((w) => w.uid !== selectedWallUid)); setSelectedWallUid(null); }}
+                style={{ width: "100%", background: "#2d1a1a", border: "1px solid #4a2020", borderRadius: 8, color: "#f87171", padding: "8px", fontSize: 12, cursor: "pointer", fontWeight: 500 }}>
+                Delete Door
+              </button>
+            </>
+          );
           if (selWall.type === "column") return (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
@@ -5545,9 +5737,26 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
   const [mouseWorld, setMouseWorld] = React.useState(null);
   const [dragging, setDragging] = React.useState(null);
   const [columnDrag, setColumnDrag] = React.useState(null);
+  const [doorFirstClick, setDoorFirstClick] = React.useState(null); // { wallUid, projPt }
   const [, forceUpdate] = React.useReducer(x => x+1, 0);
   const wallSessionRef = React.useRef(null); // groupId for current wall session
+  const wallLockedAngleRef = React.useRef(null); // angle locked when Shift is held
   const dragWasActiveRef = React.useRef(false); // prevent click after drag
+  const activeToolRef = React.useRef(activeTool);
+  React.useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
+  const wallStartRef = React.useRef(wallStart);
+  React.useEffect(() => { wallStartRef.current = wallStart; }, [wallStart]);
+  const mouseWorldRef = React.useRef(mouseWorld);
+  React.useEffect(() => { mouseWorldRef.current = mouseWorld; }, [mouseWorld]);
+
+  // Project a world point onto a wall segment, return t in [0,1] and clamped point
+  const projectOntoWall = React.useCallback((wx, wz, wall) => {
+    const dx = wall.x2 - wall.x1, dz = wall.z2 - wall.z1;
+    const len2 = dx * dx + dz * dz;
+    if (len2 < 0.0001) return null;
+    const t = Math.max(0.05, Math.min(0.95, ((wx - wall.x1) * dx + (wz - wall.z1) * dz) / len2));
+    return { t, x: wall.x1 + t * dx, z: wall.z1 + t * dz };
+  }, []);
 
   // resize observer
   React.useEffect(() => {
@@ -5617,7 +5826,8 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
         if (e.key === 'v' || e.key === 'V') setActiveTool('select');
         if (e.key === 'w' || e.key === 'W') setActiveTool('wall');
         if (e.key === 'c' || e.key === 'C') setActiveTool('column');
-        if (e.key === 'Escape') { setWallStart(null); wallSessionRef.current = null; setActiveTool('select'); }
+        if (e.key === 'd' || e.key === 'D') setActiveTool('door');
+        if (e.key === 'Escape') { setWallStart(null); wallSessionRef.current = null; wallLockedAngleRef.current = null; setDoorFirstClick(null); setActiveTool('select'); }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -5626,6 +5836,7 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
 
   const draggingRef = React.useRef(null);
   draggingRef.current = dragging;
+  const mouseDownPosRef = React.useRef(null); // track mousedown position for drag threshold
 
   React.useEffect(() => {
     const onMove = (e) => {
@@ -5633,7 +5844,43 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
       if (!rect) return;
       const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
       const raw = screenToWorld(sx, sy);
-      const w = snapWorld(raw.x, raw.z, e.shiftKey);
+      let w = snapWorld(raw.x, raw.z, e.shiftKey);
+
+      // Wall tool angle snap + lock: use refs to avoid stale closure
+      if (activeToolRef.current === 'wall' && wallStartRef.current) {
+        const ws = wallStartRef.current;
+        const SNAP_STEP = Math.PI / 4;
+        if (e.altKey) {
+          // Alt = totally free, no angle snap, no position snap
+          wallLockedAngleRef.current = null;
+          w = { x: raw.x, z: raw.z };
+        } else if (e.shiftKey) {
+          if (wallLockedAngleRef.current === null) {
+            const cur = mouseWorldRef.current ?? raw;
+            const dx = cur.x - ws.x, dz = cur.z - ws.z;
+            const curLen = Math.hypot(dx, dz);
+            if (curLen > 0.001) {
+              wallLockedAngleRef.current = Math.round(Math.atan2(dx, dz) / SNAP_STEP) * SNAP_STEP;
+            } else {
+              wallLockedAngleRef.current = 0;
+            }
+          }
+          const a = wallLockedAngleRef.current;
+          const dx = raw.x - ws.x, dz = raw.z - ws.z;
+          const len = Math.max(0.01, dx * Math.sin(a) + dz * Math.cos(a));
+          w = { x: ws.x + Math.sin(a) * len, z: ws.z + Math.cos(a) * len };
+        } else {
+          wallLockedAngleRef.current = null;
+          const dx = raw.x - ws.x, dz = raw.z - ws.z;
+          const len = Math.hypot(dx, dz);
+          if (len > 0.001) {
+            const a = Math.atan2(dx, dz);
+            const snapped = Math.round(a / SNAP_STEP) * SNAP_STEP;
+            const snappedLen = Math.max(0.01, dx * Math.sin(snapped) + dz * Math.cos(snapped));
+            w = snapWorld(ws.x + Math.sin(snapped) * snappedLen, ws.z + Math.cos(snapped) * snappedLen, false);
+          }
+        }
+      }
       setMouseWorld(w);
       if (columnDrag) setColumnDrag((prev) => prev ? { ...prev, end: w } : null);
       const drag = draggingRef.current;
@@ -5662,7 +5909,11 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
     };
     const onUp = (e) => {
       if (draggingRef.current) {
-        dragWasActiveRef.current = true;
+        // Only suppress click if mouse actually moved (>4px threshold)
+        const down = mouseDownPosRef.current;
+        if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
+          dragWasActiveRef.current = true;
+        }
         setDragging(null);
       }
       if (columnDrag) {
@@ -5679,19 +5930,21 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
         setColumnDrag(null);
       }
     };
+    const onMouseDown = (e) => { mouseDownPosRef.current = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    return () => { window.removeEventListener('mousedown', onMouseDown); window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
   }, [dragging, columnDrag, screenToWorld, onMoveItems, onMoveWall, onAddWall]);
 
-  const handleMouseMove = (e) => {
-    const w = getWorldFromEvent(e);
-    setMouseWorld(w);
+  const handleMouseMove = (_e) => {
+    // mouseWorld is set by the onMove listener which includes angle snap
   };
 
   const handleSvgClick = (e) => {
     if (dragWasActiveRef.current) { dragWasActiveRef.current = false; return; }
-    const w = getWorldFromEvent(e);
+    // Use mouseWorld which already has angle+position snap applied
+    const w = mouseWorld || getWorldFromEvent(e);
     if (activeTool === 'wall') {
       if (!wallStart) {
         wallSessionRef.current = `wallgroup_${Date.now()}`;
@@ -5700,6 +5953,51 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
         const wallConfig = { height: 2.4, thickness: 0.1, glassRatio: 0, color: "#ffffff" };
         onAddWall({ uid: `wall_${Date.now()}`, x1: wallStart.x, z1: wallStart.z, x2: w.x, z2: w.z, groupId: wallSessionRef.current, ...wallConfig });
         setWallStart(w);
+        wallLockedAngleRef.current = null;
+      }
+    } else if (activeTool === 'door') {
+      const plainWalls = walls.filter(wl => !wl.type || wl.type === 'wall');
+      if (!doorFirstClick) {
+        // First click: find closest wall and project
+        let bestWall = null, bestDist = 1.2, bestProj = null;
+        plainWalls.forEach(wl => {
+          const proj = projectOntoWall(w.x, w.z, wl);
+          if (!proj) return;
+          const dist = Math.hypot(w.x - proj.x, w.z - proj.z);
+          if (dist < bestDist) { bestDist = dist; bestWall = wl; bestProj = proj; }
+        });
+        if (bestWall && bestProj) {
+          setDoorFirstClick({ wallUid: bestWall.uid, projPt: bestProj, t: bestProj.t });
+          onSelectWall(bestWall.uid);
+        }
+      } else {
+        // Second click: defines door span on the same wall
+        const srcWall = walls.find(wl => wl.uid === doorFirstClick.wallUid);
+        if (!srcWall) { setDoorFirstClick(null); return; }
+        const proj2 = projectOntoWall(w.x, w.z, srcWall);
+        if (!proj2) { setDoorFirstClick(null); return; }
+        const t1 = Math.min(doorFirstClick.t, proj2.t);
+        const t2 = Math.max(doorFirstClick.t, proj2.t);
+        const wdx = srcWall.x2 - srcWall.x1, wdz = srcWall.z2 - srcWall.z1;
+        const totalLen = Math.hypot(wdx, wdz);
+        const doorW = (t2 - t1) * totalLen;
+        if (doorW < 0.1) { setDoorFirstClick(null); return; }
+        const gid = srcWall.groupId || `wallgroup_${Date.now()}`;
+        const baseProps = { height: srcWall.height || 2.4, thickness: srcWall.thickness || 0.1, glassRatio: 0, color: srcWall.color || "#ffffff", groupId: gid };
+        const ts = Date.now();
+        const segA = { uid: `wall_${ts}_a`, x1: srcWall.x1, z1: srcWall.z1, x2: srcWall.x1 + wdx * t1, z2: srcWall.z1 + wdz * t1, ...baseProps, noMiterEnd: true };
+        const doorSeg = { uid: `wall_${ts}_d`, type: 'door', x1: srcWall.x1 + wdx * t1, z1: srcWall.z1 + wdz * t1, x2: srcWall.x1 + wdx * t2, z2: srcWall.z1 + wdz * t2, width: doorW, height: Math.min(2.1, (srcWall.height || 2.4) - 0.1), wallHeight: srcWall.height || 2.4, wallColor: srcWall.color || "#cccccc", thickness: srcWall.thickness || 0.1, openAngle: 45, color: "#a07840", groupId: gid };
+        const segC = { uid: `wall_${ts}_c`, x1: srcWall.x1 + wdx * t2, z1: srcWall.z1 + wdz * t2, x2: srcWall.x2, z2: srcWall.z2, ...baseProps, noMiterStart: true };
+        const segALen = Math.hypot(segA.x2 - segA.x1, segA.z2 - segA.z1);
+        const segCLen = Math.hypot(segC.x2 - segC.x1, segC.z2 - segC.z1);
+        // Remove original and add segments
+        onAddWall({ uid: `__remove__${srcWall.uid}`, __removeUid: srcWall.uid });
+        if (segALen > 0.05) onAddWall(segA);
+        onAddWall(doorSeg);
+        if (segCLen > 0.05) onAddWall(segC);
+        onSelectWall(doorSeg.uid);
+        setDoorFirstClick(null);
+        setActiveTool('select');
       }
     } else if (activeTool === 'select') {
       onSelectUids([]);
@@ -5715,7 +6013,7 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
     model: 'copy',
   }[activeTool] || 'default';
 
-  const isDrawingTool = activeTool === 'wall' || activeTool === 'column';
+  const isDrawingTool = activeTool === 'wall' || activeTool === 'column' || activeTool === 'door';
 
   // scale factor: pixels per meter
   const cam = threeRef.current?.orthoCam;
@@ -5729,6 +6027,7 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
           ['select', 'V', <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 3l14 9-7 1-4 7z"/></svg>],
           ['wall', 'W', <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>],
           ['column', 'C', <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="8" y="3" width="8" height="18" rx="1"/></svg>],
+          ['door', 'D', <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="2" width="13" height="20" rx="1"/><path d="M16 12h2m2 0h-2m0-3v6" strokeLinecap="round"/><circle cx="13.5" cy="12" r="1" fill="currentColor" stroke="none"/></svg>],
         ].map(([tool, key, icon]) => (
           <button key={tool} onClick={() => { setActiveTool(tool); if (tool !== 'wall') setWallStart(null); setColumnDrag(null); }}
             title={`${tool.charAt(0).toUpperCase()+tool.slice(1)} (${key})`}
@@ -5759,6 +6058,42 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
           />
         )}
 
+        {/* Door preview (first click placed, hovering second point) */}
+        {activeTool === 'door' && doorFirstClick && mouseWorld && (() => {
+          const srcWall = walls.find(wl => wl.uid === doorFirstClick.wallUid);
+          if (!srcWall) return null;
+          const proj2 = projectOntoWall(mouseWorld.x, mouseWorld.z, srcWall);
+          if (!proj2) return null;
+          const t1 = Math.min(doorFirstClick.t, proj2.t);
+          const t2 = Math.max(doorFirstClick.t, proj2.t);
+          const wdx = srcWall.x2 - srcWall.x1, wdz = srcWall.z2 - srcWall.z1;
+          const pp1 = worldToScreen(srcWall.x1 + wdx * t1, srcWall.z1 + wdz * t1);
+          const pp2 = worldToScreen(srcWall.x1 + wdx * t2, srcWall.z1 + wdz * t2);
+          const p1dot = worldToScreen(doorFirstClick.projPt.x, doorFirstClick.projPt.z);
+          return (
+            <g>
+              <line x1={pp1.x} y1={pp1.y} x2={pp2.x} y2={pp2.y} stroke="#f59e0b" strokeWidth={4} strokeLinecap="round" opacity={0.9}/>
+              <circle cx={p1dot.x} cy={p1dot.y} r={5} fill="#f59e0b" stroke="#0d0f18" strokeWidth={1.5}/>
+              <circle cx={pp2.x} cy={pp2.y} r={5} fill="#f59e0b" stroke="#0d0f18" strokeWidth={1.5} strokeDasharray="3,2" opacity={0.7}/>
+            </g>
+          );
+        })()}
+
+        {/* Door preview first click marker */}
+        {activeTool === 'door' && !doorFirstClick && mouseWorld && (() => {
+          const plainWalls = walls.filter(wl => !wl.type || wl.type === 'wall');
+          let bestProj = null, bestDist = 1.2;
+          plainWalls.forEach(wl => {
+            const proj = projectOntoWall(mouseWorld.x, mouseWorld.z, wl);
+            if (!proj) return;
+            const dist = Math.hypot(mouseWorld.x - proj.x, mouseWorld.z - proj.z);
+            if (dist < bestDist) { bestDist = dist; bestProj = { x: proj.x, z: proj.z }; }
+          });
+          if (!bestProj) return null;
+          const ps = worldToScreen(bestProj.x, bestProj.z);
+          return <circle cx={ps.x} cy={ps.y} r={6} fill="none" stroke="#f59e0b" strokeWidth={2} opacity={0.8}/>;
+        })()}
+
         {/* Walls */}
         {walls.filter(w => w.type !== 'column').map((wall) => {
           const p1 = worldToScreen(wall.x1, wall.z1);
@@ -5766,23 +6101,28 @@ function Layout2DOverlay({ mountRef, threeRef, items, walls, catalog, floorW, fl
           const selectedWall = walls.find(w => w.uid === selectedWallUid);
           const isSelected = wall.uid === selectedWallUid || (selectedWall?.groupId && wall.groupId === selectedWall.groupId);
           return (
-            <g key={wall.uid} style={{ pointerEvents: 'all' }} onMouseDown={(e) => {
-              e.stopPropagation();
-              if (activeTool === 'select') {
-                // select whole wall group if it has one
-                const groupId = wall.groupId;
-                const groupWalls = groupId ? walls.filter(w => w.groupId === groupId) : [wall];
-                onSelectWall(wall.uid);
-                const ww = getWorldFromEvent(e);
-                // store all walls in group for moving together
-                const startPositions = {};
-                groupWalls.forEach(gw => { startPositions[gw.uid] = { x1: gw.x1, z1: gw.z1, x2: gw.x2, z2: gw.z2 }; });
-                setDragging({ type: 'wallGroup', groupWalls, startWorld: ww, startPositions });
-              }
-            }}>
+            <g key={wall.uid} style={{ pointerEvents: 'all' }}
+              onMouseDown={(e) => {
+                if (activeTool === 'door') return; // let click bubble to hit rect
+                e.stopPropagation();
+                if (activeTool === 'select') {
+                  const groupId = wall.groupId;
+                  const groupWalls = groupId ? walls.filter(w => w.groupId === groupId) : [wall];
+                  onSelectWall(wall.uid);
+                  const ww = getWorldFromEvent(e);
+                  const startPositions = {};
+                  groupWalls.forEach(gw => { startPositions[gw.uid] = { x1: gw.x1, z1: gw.z1, x2: gw.x2, z2: gw.z2 }; });
+                  setDragging({ type: 'wallGroup', groupWalls, startWorld: ww, startPositions });
+                }
+              }}
+              onClick={(e) => {
+                if (activeTool === 'door') { e.stopPropagation(); handleSvgClick(e); }
+              }}>
               <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="transparent" strokeWidth={12} style={{ cursor: 'pointer' }} />
               <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
-                stroke={isSelected ? '#00e5ff' : '#e2e8f0'} strokeWidth={isSelected ? 3 : 2} strokeLinecap="round"/>
+                stroke={isSelected ? '#00e5ff' : wall.type === 'door' ? '#f59e0b' : '#e2e8f0'}
+                strokeWidth={isSelected ? 3 : 2} strokeLinecap="round"
+                strokeDasharray={wall.type === 'door' ? '6,3' : undefined}/>
               {isSelected && <>
                 {[{x: p1.x, y: p1.y, ep: 'start'}, {x: p2.x, y: p2.y, ep: 'end'}].map(({x, y, ep}) => (
                   <circle key={ep} cx={x} cy={y} r={6} fill="#00e5ff" stroke="#0d0f18" strokeWidth={1.5}
@@ -5917,6 +6257,7 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
   const [pan, setPan] = React.useState({ x: 0, y: 0 });
   const [points, setPoints] = React.useState([]); // calibration points [{x,y}] in image coords
   const [outlinePoints, setOutlinePoints] = React.useState([]);
+  const [rectDrag, setRectDrag] = React.useState(null); // { start: {x,y}, end: {x,y} } for outline rect drag
   const [distance, setDistance] = React.useState("3");
   const [img, setImg] = React.useState(null);
   const isPanning = React.useRef(false);
@@ -5972,8 +6313,25 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
       ctx.closePath(); ctx.stroke();
       ctx.fillStyle = "rgba(196,98,45,0.15)"; ctx.fill();
     }
+    // Rect drag preview
+    if (modal.step === 'outline' && rectDrag) {
+      const { start, end } = rectDrag;
+      const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y);
+      const w = Math.abs(end.x - start.x), h = Math.abs(end.y - start.y);
+      ctx.strokeStyle = "#00e5ff"; ctx.lineWidth = lineW;
+      ctx.setLineDash([8 / zoom, 4 / zoom]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(0,229,255,0.08)";
+      ctx.fillRect(x, y, w, h);
+      // corner dots
+      [[x,y],[x+w,y],[x+w,y+h],[x,y+h]].forEach(([cx2,cy2]) => {
+        ctx.fillStyle = "#00e5ff";
+        ctx.beginPath(); ctx.arc(cx2, cy2, markerR, 0, Math.PI*2); ctx.fill();
+      });
+    }
     ctx.restore();
-  }, [img, zoom, pan, points, outlinePoints, modal.step, distance, unit]);
+  }, [img, zoom, pan, points, outlinePoints, modal.step, distance, unit, rectDrag]);
 
   const getCanvasPoint = (e) => {
     const canvas = canvasRef.current;
@@ -5991,8 +6349,43 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
     const pt = getCanvasPoint(e);
     if (modal.step === 'calibrate') {
       if (points.length < 2) setPoints((prev) => [...prev, pt]);
-    } else {
-      setOutlinePoints((prev) => [...prev, pt]);
+    }
+    // outline step handled by mousedown/mousemove/mouseup
+  };
+
+  const handleMouseDown = (e) => {
+    if (e.button === 1 || e.button === 2) { isPanning.current = true; lastPan.current = { x: e.clientX, y: e.clientY }; return; }
+    if (e.button === 0 && modal.step === 'outline') {
+      const pt = getCanvasPoint(e);
+      setRectDrag({ start: pt, end: pt });
+      setOutlinePoints([]); // reset previous
+    }
+  };
+
+  const handleMouseMove = (e) => {
+    if (isPanning.current) {
+      const dx = e.clientX - lastPan.current.x, dy = e.clientY - lastPan.current.y;
+      lastPan.current = { x: e.clientX, y: e.clientY };
+      setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+      return;
+    }
+    if (rectDrag) {
+      const pt = getCanvasPoint(e);
+      setRectDrag((prev) => prev ? { ...prev, end: pt } : null);
+    }
+  };
+
+  const handleMouseUp = (e) => {
+    isPanning.current = false;
+    if (rectDrag && modal.step === 'outline') {
+      const { start, end } = rectDrag;
+      if (Math.hypot(end.x - start.x, end.y - start.y) > 5) {
+        // Build 4 corners clockwise from top-left
+        const x1 = Math.min(start.x, end.x), y1 = Math.min(start.y, end.y);
+        const x2 = Math.max(start.x, end.x), y2 = Math.max(start.y, end.y);
+        setOutlinePoints([{ x: x1, y: y1 }, { x: x2, y: y1 }, { x: x2, y: y2 }, { x: x1, y: y2 }]);
+      }
+      setRectDrag(null);
     }
   };
 
@@ -6023,14 +6416,6 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
     });
   };
 
-  const handleMouseDown = (e) => { if (e.button === 1 || e.button === 2) { isPanning.current = true; lastPan.current = { x: e.clientX, y: e.clientY }; } };
-  const handleMouseMove = (e) => {
-    if (!isPanning.current) return;
-    const dx = e.clientX - lastPan.current.x, dy = e.clientY - lastPan.current.y;
-    lastPan.current = { x: e.clientX, y: e.clientY };
-    setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
-  };
-  const handleMouseUp = () => { isPanning.current = false; };
 
   const canConfirmCalibrate = points.length === 2 && parseFloat(distance) > 0;
   const canConfirmOutline = outlinePoints.length >= 3;
@@ -6070,13 +6455,16 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
         <p style={{ fontSize: 12, color: "#999", margin: 0 }}>
           {modal.step === 'calibrate'
             ? "Click two points on a wall or dimension you know the real size of. Scroll to zoom, middle-click to pan."
-            : "Click to trace the floor outline polygon. Double-click last point or click Confirm when done. Scroll to zoom, middle-click to pan."}
+            : "Click and drag to draw the floor rectangle. Scroll to zoom, middle-click to pan."}
         </p>
 
         {/* Canvas */}
-        <div style={{ overflow: "hidden", border: "1px solid #33363d", borderRadius: 8, cursor: "crosshair", position: "relative", alignSelf: "center" }}
+        <div style={{ overflow: "hidden", border: "1px solid #33363d", borderRadius: 8, cursor: modal.step === 'outline' ? "crosshair" : "crosshair", position: "relative", alignSelf: "center" }}
           onWheel={handleWheel}
-          onMouseDown={(e) => { handleCanvasClick(e); handleMouseDown(e); }}
+          onMouseDown={(e) => {
+            if (modal.step === 'calibrate') { handleCanvasClick(e); }
+            handleMouseDown(e);
+          }}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onContextMenu={(e) => e.preventDefault()}
@@ -6113,17 +6501,18 @@ function FloorPlanModal({ modal, onConfirmCalibrate, onConfirmOutline, onConfirm
         )}
         {modal.step === 'outline' && (
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span style={{ fontSize: 12, color: "#999" }}>Points: {outlinePoints.length} (min 3)</span>
-            <button onClick={() => setOutlinePoints((p) => p.slice(0,-1))} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Undo last</button>
+            <span style={{ fontSize: 12, color: outlinePoints.length === 4 ? "#4ade80" : "#999" }}>
+              {outlinePoints.length === 4 ? "✓ Rectangle ready" : "Drag to draw rectangle"}
+            </span>
             <button onClick={() => setOutlinePoints([])} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Reset</button>
-            <button onClick={() => onConfirmOutline(null)} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Skip (use rectangle)</button>
+            <button onClick={() => onConfirmOutline(null)} style={{ background: "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12 }}>Skip (use image size)</button>
             <div style={{ flex: 1 }} />
             <button
               onClick={handleConfirmOutline}
               disabled={!canConfirmOutline}
               style={{ background: canConfirmOutline ? "#2d6a4f" : "#33363d", border: "none", color: "#fff", borderRadius: 6, padding: "8px 20px", cursor: canConfirmOutline ? "pointer" : "default", fontSize: 13, fontWeight: 600 }}
             >
-              Confirm outline ✓
+              Confirm ✓
             </button>
           </div>
         )}
