@@ -3528,14 +3528,20 @@ export default function BoothPlannerV2() {
 
   // ===================== File menu =====================
   const buildProjectData = () => ({
-    version: 1,
+    version: 2,
     name: projectName,
     savedAt: new Date().toISOString(),
     manifestUrl,
     unit,
     floorW, floorD, floorColor,
     floorPlan: floorPlan || null,
-    items, walls, cameras,
+    // Normalize items: use modelId (unified format) + keep kind for BP internal use
+    items: items.map(({ catalogId, ...rest }) => ({
+      ...rest,
+      modelId: catalogId,
+      catalogId, // keep for backwards compat
+    })),
+    walls, cameras,
     catalogColors,
     wallConfig,
   });
@@ -3548,7 +3554,14 @@ export default function BoothPlannerV2() {
     if (data.floorD) setFloorD(data.floorD);
     if (data.floorColor) setFloorColor(data.floorColor);
     setFloorPlan(data.floorPlan || null);
-    setItems((data.items || []).map(migrateItem));
+    setItems((data.items || []).map(it => {
+      // Accept both modelId (unified format) and catalogId (legacy BP format)
+      const migrated = migrateItem(it);
+      if (migrated.modelId && !migrated.catalogId) {
+        return { ...migrated, catalogId: migrated.modelId, kind: migrated.kind || 'model' };
+      }
+      return migrated;
+    }));
     setWalls(data.walls || []);
     setCameras(data.cameras || []);
     if (data.catalogColors) setCatalogColors(data.catalogColors);
