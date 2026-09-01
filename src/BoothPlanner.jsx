@@ -2679,6 +2679,42 @@ export default function BoothPlannerV2() {
             container.add(root);
             applyColorToContainer(root, it.color || def.color || "#888888", def);
             applySocketVisibility(root, it.sockets);
+            // Detect toggle_ meshes and apply toggleStates
+            const toggleMeshes = [];
+            const toggleGroupCounts = {};
+            root.traverse((child) => {
+              if (!child.name) return;
+              const base = child.name.replace(/\.\d+$/, '');
+              if (!base.toLowerCase().startsWith('toggle_')) return;
+              const parts = base.slice(7).split('_');
+              if (parts.length >= 2) {
+                toggleGroupCounts[parts[0]] = (toggleGroupCounts[parts[0]] || 0) + 1;
+              }
+            });
+            root.traverse((child) => {
+              if (!child.name) return;
+              const base = child.name.replace(/\.\d+$/, '');
+              if (!base.toLowerCase().startsWith('toggle_')) return;
+              const parts = base.slice(7).split('_');
+              const isRealGroup = parts.length >= 2 && toggleGroupCounts[parts[0]] > 1;
+              const group = isRealGroup ? parts[0] : null;
+              const variant = isRealGroup ? parts.slice(1).join('_') : null;
+              toggleMeshes.push({ name: child.name, base, group, variant });
+              // Default visibility: simple = off, group = first variant on
+              if (isRealGroup) {
+                const groupMembers = toggleMeshes.filter(t => t.group === group);
+                child.visible = groupMembers.length === 1; // first = visible
+              } else {
+                child.visible = false;
+              }
+            });
+            container.userData.toggleMeshes = toggleMeshes;
+            // Apply saved toggleStates
+            if (it.toggleStates) {
+              Object.entries(it.toggleStates).forEach(([meshName, visible]) => {
+                root.traverse((child) => { if (child.name === meshName) child.visible = visible; });
+              });
+            }
             // calcular el bounding box en espacio LOCAL del root (antes de la rotación del container)
             // para que el outline siempre tenga el tamaño correcto sin importar la rotación
             const tempParent = new THREE.Group();
@@ -2825,6 +2861,12 @@ export default function BoothPlannerV2() {
             }
           }
         });
+        // Apply toggle mesh states
+        if (it.toggleStates) {
+          Object.entries(it.toggleStates).forEach(([meshName, visible]) => {
+            realModel.traverse((child) => { if (child.name === meshName) child.visible = visible; });
+          });
+        }
       } else {
         const placeholder = container.children.find((c) => c.userData.isPlaceholder);
         if (placeholder) {
@@ -3393,6 +3435,26 @@ export default function BoothPlannerV2() {
       updateSelected({ sockets: buildNewSockets(selectedItem.sockets) });
     }
   };
+  const toggleMesh = (meshName, group) => {
+    if (!selectedItem) return;
+    setItems((prev) => prev.map((it) => {
+      if (it.uid !== selectedUid) return it;
+      const toggleStates = { ...(it.toggleStates || {}) };
+      if (group) {
+        // Mutually exclusive: turn on this variant, turn off others in same group
+        const { itemGroup } = threeRef.current;
+        const container = itemGroup?.children.find((c) => c.userData.uid === it.uid);
+        const allToggleMeshes = container?.userData?.toggleMeshes || [];
+        allToggleMeshes.filter(t => t.group === group).forEach(t => {
+          toggleStates[t.name] = t.name === meshName;
+        });
+      } else {
+        toggleStates[meshName] = !toggleStates[meshName];
+      }
+      return { ...it, toggleStates };
+    }));
+  };
+
   const replaceSelected = (newDef, newKind) => {
     if (!selectedItem) return;
     updateSelected({ catalogId: newDef.id, kind: newKind, color: newDef.color || "#888888", sockets: {} });
@@ -4995,6 +5057,73 @@ export default function BoothPlannerV2() {
               )}
             </div>
           )}
+
+          {/* Toggle Meshes — feet, double sided, etc. */}
+          {(() => {
+            const { itemGroup } = threeRef.current;
+            const container = itemGroup?.children.find((c) => c.userData.uid === selectedUid);
+            const toggleMeshes = container?.userData?.toggleMeshes || [];
+            if (!toggleMeshes.length) return null;
+            // Deduplicate: groups show once, simples show individually
+            const shown = [];
+            const seenGroups = new Set();
+            toggleMeshes.forEach(t => {
+              if (t.group) {
+                if (!seenGroups.has(t.group)) { seenGroups.add(t.group); shown.push({ type: 'group', group: t.group }); }
+              } else {
+                shown.push({ type: 'simple', name: t.name, base: t.base });
+              }
+            });
+            const TOGGLE_LABELS = { 'toggle_back_panel': 'Double Sided' };
+            return (
+              <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Options</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {shown.map((item) => {
+                    if (item.type === 'simple') {
+                      const isOn = !!(selectedItem?.toggleStates?.[item.name]);
+                      const label = TOGGLE_LABELS[item.base] || item.base.slice(7).replace(/_/g, ' ').replace(/\w/g, c => c.toUpperCase());
+                      return (
+                        <div key={item.name} onClick={() => toggleMesh(item.name, null)}
+                          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", padding: "6px 0" }}>
+                          <span style={{ fontSize: 12, color: isOn ? "#e2e8f0" : "#64748b" }}>{label}</span>
+                          <div style={{ width: 36, height: 20, background: isOn ? "#5b4bff" : "#1e2035", border: isOn ? "none" : "1px solid #2a2f4a", borderRadius: 10, position: "relative", flexShrink: 0 }}>
+                            <div style={{ width: 16, height: 16, background: isOn ? "#fff" : "#475569", borderRadius: "50%", position: "absolute", top: 2, left: isOn ? 18 : 2 }} />
+                          </div>
+                        </div>
+                      );
+                    } else {
+                      // Group: radio buttons for each variant
+                      const groupMeshes = toggleMeshes.filter(t => t.group === item.group);
+                      const activeVariant = groupMeshes.find(t => selectedItem?.toggleStates?.[t.name] === true)?.name
+                        || groupMeshes[0]?.name;
+                      const label = item.group.replace(/_/g, ' ').replace(/\w/g, c => c.toUpperCase());
+                      return (
+                        <div key={item.group}>
+                          <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>{label}</div>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {groupMeshes.map(t => {
+                              const varLabel = t.variant.replace(/_/g, ' ').replace(/\w/g, c => c.toUpperCase());
+                              const isActive = activeVariant === t.name;
+                              return (
+                                <button key={t.name} onClick={() => toggleMesh(t.name, item.group)}
+                                  style={{ flex: 1, padding: "5px 8px", fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: "pointer",
+                                    border: `1px solid ${isActive ? "#5b4bff" : "#1e2035"}`,
+                                    background: isActive ? "#5b4bff" : "#0d0f18",
+                                    color: isActive ? "#fff" : "#64748b" }}>
+                                  {varLabel}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    }
+                  })}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Rotation */}
           <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
