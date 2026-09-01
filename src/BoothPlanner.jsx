@@ -574,8 +574,8 @@ export default function BoothPlannerV2() {
   const [floorPlanModal, setFloorPlanModal] = useState(null); // { step: 'calibrate'|'outline', dataUrl, ... }
   const floorPlanFileRef = useRef(null);
   const DEFAULT_MANIFEST_URL = window.location.pathname.includes('/dev/')
-    ? 'https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/dev/models/manifest.json'
-    : 'https://raw.githubusercontent.com/Abacus-Arturo/booth-planner-library/main/models/manifest.json';
+    ? 'https://raw.githubusercontent.com/arturo-backdrop/Backdrop-3D-Library/main/models/manifest-client.json'
+    : 'https://raw.githubusercontent.com/arturo-backdrop/Backdrop-3D-Library/main/models/manifest-client.json';
   const [manifestUrl, setManifestUrl] = useState(DEFAULT_MANIFEST_URL);
   const [catalog, setCatalog] = useState(DEFAULT_MANIFEST);
   const findDef = useCallback((kindCategory, catalogId) => {
