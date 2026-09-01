@@ -526,9 +526,6 @@ function generateThumbnail(scene3DObject, color) {
       renderer.render(scene, camera);
       const dataURL = renderer.domElement.toDataURL("image/png");
       renderer.dispose();
-      // Force WebGL context loss so the browser can free the context slot
-      const ext = renderer.getContext().getExtension('WEBGL_lose_context');
-      if (ext) ext.loseContext();
       resolve(dataURL);
     } catch (e) {
       resolve(null);
