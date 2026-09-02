@@ -5314,8 +5314,8 @@ export default function BoothPlannerV2() {
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                             <span style={{ fontSize: 10, color: "#64748b", width: 72 }}>Base height</span>
-                            <input type="number" min="0" step="0.05" value={fmt(metersTo(cfg.baseHeight, unit))}
-                              onChange={(e) => updateSocketConfig(sName, { baseHeight: Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit)) })}
+                            <input type="number" step="0.05" value={fmt(metersTo(cfg.baseHeight, unit))}
+                              onChange={(e) => updateSocketConfig(sName, { baseHeight: toMeters(parseFloat(e.target.value) || 0, unit) })}
                               style={{ ...inputStyle, flex: 1 }} />
                             <span style={{ fontSize: 10, color: "#475569" }}>{UNITS[unit].label}</span>
                           </div>
