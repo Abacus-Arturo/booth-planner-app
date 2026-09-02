@@ -51,6 +51,16 @@ function isRepeatableSocket(socketName) {
 // sockets en el manifest pueden ser string ("socket_shelf") u objeto ({name, accessoryFile})
 function getSocketName(s) { return typeof s === "string" ? s : s.name; }
 function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
+// Three.js GLB nodes may have numeric suffixes (.001, .002) — find by base name
+function getSocketObject(root, sName) {
+  let found = null;
+  root.traverse((child) => {
+    if (found) return;
+    const base = child.name.replace(/\.\d+$/, '');
+    if (base === sName) found = child;
+  });
+  return found;
+}
 
 function buildWallMesh(wall, allWalls = []) {
   // Door
@@ -2800,7 +2810,7 @@ export default function BoothPlannerV2() {
         (def.sockets || []).forEach((socketDef) => {
           const sName = getSocketName(socketDef);
           const accessoryFile = getSocketAccessoryFile(socketDef);
-          const socketObj = realModel.getObjectByName(sName);
+          const socketObj = getSocketObject(realModel, sName);
           if (!socketObj) return;
           if (isRepeatableSocket(sName)) {
             const cfg = (it.sockets && it.sockets[sName]) || null;
