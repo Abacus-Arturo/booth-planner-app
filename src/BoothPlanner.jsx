@@ -5258,10 +5258,13 @@ export default function BoothPlannerV2() {
             <div style={{ marginBottom: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Accessories</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {selectedDef.sockets.map((s) => {
+                {selectedDef.sockets.map((s, sockIdx) => {
                   const sName = getSocketName(s);
+                  const isDup = selectedDef.sockets.filter(x => getSocketName(x) === sName).length > 1;
+                  const dupIdx = selectedDef.sockets.slice(0, sockIdx).filter(x => getSocketName(x) === sName).length;
+                  const stateKey = isDup ? sName + '_' + dupIdx : sName;
                   const repeatable = isRepeatableSocket(sName);
-                  const cfg = selectedItem.sockets && selectedItem.sockets[sName];
+                  const cfg = selectedItem.sockets && (selectedItem.sockets[stateKey] !== undefined ? selectedItem.sockets[stateKey] : selectedItem.sockets[sName]);
                   const isOn = repeatable ? !!(cfg && cfg.enabled) : !!cfg;
                   const isLamp = sName.includes("lamp");
                   const accentColor = isLamp ? "#f59e0b" : "#818cf8";
@@ -5271,8 +5274,8 @@ export default function BoothPlannerV2() {
                     ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={isOn ? accentColor : "#475569"} strokeWidth="2"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.3 6H8.3C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/></svg>
                     : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={isOn ? accentColor : "#475569"} strokeWidth="2"><rect x="2" y="3" width="20" height="4" rx="1"/><rect x="2" y="10" width="20" height="4" rx="1"/><rect x="2" y="17" width="20" height="4" rx="1"/></svg>;
                   return (
-                    <div key={sName} style={{ borderRadius: 10, border: `1.5px solid ${isOn ? accentBorder : "#1e2035"}`, background: isOn ? accentBg : "#13162a", overflow: "hidden" }}>
-                      <div onClick={() => toggleSocket(sName)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "pointer" }}>
+                    <div key={stateKey} style={{ borderRadius: 10, border: `1.5px solid ${isOn ? accentBorder : "#1e2035"}`, background: isOn ? accentBg : "#13162a", overflow: "hidden" }}>
+                      <div onClick={() => toggleSocket(sName, stateKey)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "pointer" }}>
                         <div style={{ width: 32, height: 32, borderRadius: 8, background: isOn ? `${accentColor}22` : "#1e2035", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                           {icon}
                         </div>
