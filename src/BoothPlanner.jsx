@@ -3438,17 +3438,18 @@ export default function BoothPlannerV2() {
   };
   const duplicateSelectedRef = useRef(() => {});
   useEffect(() => { duplicateSelectedRef.current = duplicateSelected; });
-  const toggleSocket = (sName) => {
+  const toggleSocket = (sName, stateKey) => {
+    const key = stateKey || sName;
     if (!selectedItem) return;
     const buildNewSockets = (current) => {
       const sockets = { ...(current || {}) };
       if (isRepeatableSocket(sName)) {
-        const cur = sockets[sName];
-        sockets[sName] = cur && cur.enabled
+        const cur = sockets[key] || sockets[sName];
+        sockets[key] = cur && cur.enabled
           ? { ...cur, enabled: false }
           : { enabled: true, count: (cur && cur.count) || 1, spacing: (cur && cur.spacing) || 0.3, baseHeight: (cur && cur.baseHeight) || 0.3 };
       } else {
-        sockets[sName] = !sockets[sName];
+        sockets[key] = !sockets[key];
       }
       return sockets;
     };
@@ -3464,7 +3465,8 @@ export default function BoothPlannerV2() {
     }
   };
 
-  const updateSocketConfig = (sName, patch) => {
+  const updateSocketConfig = (sName, patch, stateKey) => {
+    const key = stateKey || sName;
     if (!selectedItem) return;
     const buildNewSockets = (current) => {
       const sockets = { ...(current || {}) };
