@@ -667,6 +667,9 @@ export default function BoothPlannerV2() {
   const [wallToolActive, setWallToolActive] = useState(false);
   const wallSessionIdRef = useRef(null);
   const [floorDark, setFloorDark] = useState(false);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const snapEnabledRef = useRef(true);
+  useEffect(() => { snapEnabledRef.current = snapEnabled; }, [snapEnabled]);
   const floorColorRef = useRef("#878787");
   useEffect(() => { floorColorRef.current = floorColor; }, [floorColor]);
   const [measureToolActive, setMeasureToolActive] = useState(false);
@@ -1905,9 +1908,10 @@ export default function BoothPlannerV2() {
       });
 
       let snapDX = 0, snapDZ = 0, bestSnapDist = SOCKET_SNAP_R;
+      const snapActive = snapEnabledRef?.current ?? true;
       let axisLockX = null, axisLockZ = null;
 
-      if (dragSnapPts.length > 0) {
+      if (dragSnapPts.length > 0 && snapActive) {
         // 1. Socket snap
         itemGroup.children.forEach(staticObj => {
           if (draggingUids.has(staticObj.userData.uid)) return;
@@ -4649,6 +4653,13 @@ export default function BoothPlannerV2() {
 
         {/* Camera panel button — below gizmo */}
         <div style={{ position: "absolute", top: 70, right: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+          {/* Snap toggle */}
+          <button onClick={() => setSnapEnabled(v => !v)}
+            title={snapEnabled ? "Disable snap" : "Enable snap"}
+            style={{ width: 36, height: 36, background: snapEnabled ? "rgba(91,75,255,0.2)" : "rgba(13,17,23,0.85)", border: `1px solid ${snapEnabled ? "#5b4bff" : "#1e2035"}`, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={snapEnabled ? "#5b4bff" : "#64748b"} strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          </button>
+
           {/* Floor dark mode */}
           <button onClick={() => {
             const next = !floorDark;
