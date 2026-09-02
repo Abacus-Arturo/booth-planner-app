@@ -1891,21 +1891,16 @@ export default function BoothPlannerV2() {
       const dragOffsets = dragOffsetsRef.current;
       const draggingUids = new Set(Object.keys(dragOffsets));
 
-      // Place objects at raw position first
+      // Collect snap points of dragged objects using RAW position (before snap offset)
+      // This prevents the feedback loop that causes jitter
+      const dragSnapPts = [];
       Object.entries(dragOffsets).forEach(([uid, off]) => {
         const obj = itemGroup.children.find(x => x.userData.uid === uid);
-        if (!obj) return;
-        obj.position.x = pt.x + off.dx;
-        obj.position.z = pt.z + off.dz;
-      });
-
-      // Collect snap points of dragged objects in world space
-      const dragSnapPts = [];
-      Object.keys(dragOffsets).forEach(uid => {
-        const obj = itemGroup.children.find(x => x.userData.uid === uid);
         if (!obj || !obj.userData.snapPoints?.length) return;
+        const rawX = pt.x + off.dx;
+        const rawZ = pt.z + off.dz;
         obj.userData.snapPoints.forEach(sp => {
-          dragSnapPts.push({ x: obj.position.x + sp.x, z: obj.position.z + sp.z });
+          dragSnapPts.push({ x: rawX + sp.x, z: rawZ + sp.z });
         });
       });
 
