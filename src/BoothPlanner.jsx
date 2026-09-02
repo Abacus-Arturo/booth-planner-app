@@ -850,6 +850,26 @@ export default function BoothPlannerV2() {
     scene.add(floor);
     // (grid de referencia removido a petición — el piso queda limpio)
 
+    // ---- Snap guide line ----
+    const snapLineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-1, 0.01, 0), new THREE.Vector3(1, 0.01, 0)
+    ]);
+    const snapLineMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, linewidth: 2 });
+    const snapLine = new THREE.Line(snapLineGeo, snapLineMat);
+    snapLine.visible = false;
+    scene.add(snapLine);
+
+    function showSnapLine(x1, z1, x2, z2) {
+      const pts = [new THREE.Vector3(x1, 0.01, z1), new THREE.Vector3(x2, 0.01, z2)];
+      snapLine.geometry.setFromPoints(pts);
+      snapLine.visible = true;
+    }
+    function hideSnapLine() { snapLine.visible = false; }
+
+    const SOCKET_SNAP_R = 0.25; // meters
+    const AXIS_SNAP_R   = 0.06;
+    const AXIS_SEARCH_R = 2.0;
+
     // ---- Orbit (manual) ----
     const target = new THREE.Vector3(0, 0, 0);
     let radius = 14, theta = Math.PI / 4, phi = Math.PI / 3.2;
@@ -1866,9 +1886,88 @@ export default function BoothPlannerV2() {
         return;
       }
       const pt = groundPoint(e.clientX, e.clientY);
-      threeRef.current.moveGroup(dragOffsetsRef.current, pt.x, pt.z);
+
+      // ── Socket snap ──────────────────────────────────────────
+      const dragOffsets = dragOffsetsRef.current;
+      const draggingUids = new Set(Object.keys(dragOffsets));
+
+      // Place objects at raw position first
+      Object.entries(dragOffsets).forEach(([uid, off]) => {
+        const obj = itemGroup.children.find(x => x.userData.uid === uid);
+        if (!obj) return;
+        obj.position.x = pt.x + off.dx;
+        obj.position.z = pt.z + off.dz;
+      });
+
+      // Collect snap points of dragged objects in world space
+      const dragSnapPts = [];
+      Object.keys(dragOffsets).forEach(uid => {
+        const obj = itemGroup.children.find(x => x.userData.uid === uid);
+        if (!obj || !obj.userData.snapPoints?.length) return;
+        obj.userData.snapPoints.forEach(sp => {
+          dragSnapPts.push({ x: obj.position.x + sp.x, z: obj.position.z + sp.z });
+        });
+      });
+
+      let snapDX = 0, snapDZ = 0, bestSnapDist = SOCKET_SNAP_R;
+      let axisLockX = null, axisLockZ = null;
+
+      if (dragSnapPts.length > 0) {
+        // 1. Socket snap
+        itemGroup.children.forEach(staticObj => {
+          if (draggingUids.has(staticObj.userData.uid)) return;
+          if (!staticObj.userData.snapPoints?.length) return;
+          staticObj.userData.snapPoints.forEach(sp => {
+            const wx = staticObj.position.x + sp.x;
+            const wz = staticObj.position.z + sp.z;
+            dragSnapPts.forEach(dp => {
+              const dist = Math.sqrt((dp.x - wx) ** 2 + (dp.z - wz) ** 2);
+              if (dist < bestSnapDist) {
+                bestSnapDist = dist;
+                snapDX = wx - dp.x;
+                snapDZ = wz - dp.z;
+              }
+            });
+          });
+        });
+
+        // 2. Axis snap — only if no socket snap
+        if (bestSnapDist >= SOCKET_SNAP_R) {
+          itemGroup.children.forEach(staticObj => {
+            if (draggingUids.has(staticObj.userData.uid)) return;
+            if (!staticObj.userData.snapPoints?.length) return;
+            staticObj.userData.snapPoints.forEach(sp => {
+              const wx = staticObj.position.x + sp.x;
+              const wz = staticObj.position.z + sp.z;
+              dragSnapPts.forEach(dp => {
+                const dist = Math.sqrt((dp.x - wx) ** 2 + (dp.z - wz) ** 2);
+                if (dist > AXIS_SEARCH_R) return;
+                if (Math.abs(dp.x - wx) < AXIS_SNAP_R && axisLockX === null) axisLockX = wx - dp.x;
+                if (Math.abs(dp.z - wz) < AXIS_SNAP_R && axisLockZ === null) axisLockZ = wz - dp.z;
+              });
+            });
+          });
+        }
+      }
+
+      let finalDX = 0, finalDZ = 0;
+      if (bestSnapDist < SOCKET_SNAP_R) {
+        finalDX = snapDX; finalDZ = snapDZ;
+        const dp = dragSnapPts[0];
+        if (dp) showSnapLine(dp.x + finalDX - 0.5, dp.z + finalDZ, dp.x + finalDX + 0.5, dp.z + finalDZ);
+      } else if (axisLockX !== null || axisLockZ !== null) {
+        finalDX = axisLockX || 0; finalDZ = axisLockZ || 0;
+        const cx = pt.x + finalDX, cz = pt.z + finalDZ;
+        if (axisLockX !== null) showSnapLine(cx, cz - 3, cx, cz + 3);
+        else showSnapLine(cx - 3, cz, cx + 3, cz);
+      } else {
+        hideSnapLine();
+      }
+
+      threeRef.current.moveGroup(dragOffsets, pt.x + finalDX, pt.z + finalDZ);
     };
     const onUpDrag = () => {
+      hideSnapLine();
       draggingUid = null;
       draggingWallUid = null;
       if (draggingWallHandleRef.current?.type === 'array') {
@@ -2721,6 +2820,17 @@ export default function BoothPlannerV2() {
             container.add(root);
             applyColorToContainer(root, it.color || def.color || "#888888", def);
             applySocketVisibility(root, it.sockets);
+
+            // Extract snap_ empties from GLB for snap system
+            const snapPoints = [];
+            root.traverse((child) => {
+              if (!child.name || !child.name.startsWith('snap_')) return;
+              const wp = new THREE.Vector3();
+              child.getWorldPosition(wp);
+              snapPoints.push({ name: child.name, x: wp.x - container.position.x, z: wp.z - container.position.z });
+            });
+            container.userData.snapPoints = snapPoints;
+
             // Detect toggle_ meshes and apply toggleStates
             const toggleMeshes = [];
             const toggleGroupCounts = {};
