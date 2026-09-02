@@ -69,6 +69,17 @@ const migrateItem = (it) => {
 function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
 }
+// Returns the behavior of a socket def: 'fixed' | 'distribute' | 'positions' | 'toggle_mesh'
+// Falls back to name-based detection for legacy manifests without behavior field
+function getSocketBehavior(socketDef) {
+  if (!socketDef) return 'fixed';
+  if (typeof socketDef === 'string') return socketDef.includes('shelf') ? 'distribute' : 'fixed';
+  if (socketDef.behavior) return socketDef.behavior;
+  // Legacy fallback: detect by name
+  const name = socketDef.name || '';
+  if (name.includes('shelf')) return 'distribute';
+  return 'fixed';
+}
 // sockets en el manifest pueden ser string ("socket_shelf") u objeto ({name, accessoryFile})
 function getSocketName(s) { return typeof s === "string" ? s : s.name; }
 function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
