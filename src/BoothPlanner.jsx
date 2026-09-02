@@ -866,7 +866,7 @@ export default function BoothPlannerV2() {
     }
     function hideSnapLine() { snapLine.visible = false; }
 
-    const SOCKET_SNAP_R = 0.25; // meters
+    const SOCKET_SNAP_R = 0.12; // meters
     const AXIS_SNAP_R   = 0.06;
     const AXIS_SEARCH_R = 2.0;
 
