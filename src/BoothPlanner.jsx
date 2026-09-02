@@ -3456,13 +3456,12 @@ export default function BoothPlannerV2() {
     // si hay grupo completo seleccionado (2+ piezas del mismo grupo), propagar a todos
     const isWholeGroup = selectedUids.length > 1 && getOuterGroupId(selectedItem) &&
       items.filter((it) => selectedUids.includes(it.uid)).every((it) => getOuterGroupId(it) === getOuterGroupId(selectedItem));
-    if (isWholeGroup) {
-      setItems((prev) => prev.map((it) =>
-        selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it
-      ));
-    } else {
-      updateSelected({ sockets: buildNewSockets(selectedItem.sockets) });
-    }
+    setItems((prev) => prev.map((it) => {
+      if (isWholeGroup) {
+        return selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it;
+      }
+      return it.uid === selectedUid ? { ...it, sockets: buildNewSockets(it.sockets) } : it;
+    }));
   };
 
   const updateSocketConfig = (sName, patch, stateKey) => {
