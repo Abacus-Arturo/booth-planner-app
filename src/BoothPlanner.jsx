@@ -43,7 +43,28 @@ const getOuterGroupId = (it) => { const ids = getGroupIds(it); return ids.length
 const getInnerGroupId = (it) => { const ids = getGroupIds(it); return ids.length ? ids[0] : null; };
 const withOuterGroup = (it, gid) => ({ ...it, groupIds: [...getGroupIds(it), gid], groupId: undefined });
 const withoutOuterGroup = (it) => { const ids = getGroupIds(it); return { ...it, groupIds: ids.slice(0, -1), groupId: undefined }; };
-const migrateItem = (it) => it.groupIds ? it : { ...it, groupIds: it.groupId ? [it.groupId] : [], groupId: undefined };
+const migrateItem = (it) => {
+  // Step 1: migrate groupIds
+  let migrated = it.groupIds ? it : { ...it, groupIds: it.groupId ? [it.groupId] : [], groupId: undefined };
+  // Step 2: migrate sockets → socketStates (old BP format used 'sockets', new format uses 'socketStates')
+  if (migrated.sockets && !migrated.socketStates) {
+    const socketStates = {};
+    Object.entries(migrated.sockets).forEach(([k, v]) => {
+      if (typeof v === 'boolean') {
+        // old fixed socket: { socket_lamp: true } → { socket_lamp: { on: true } }
+        socketStates[k] = { on: v };
+      } else if (v && typeof v === 'object') {
+        // old repeatable: { socket_shelf: { enabled: true, count: 3, spacing: 0.3, baseHeight: 0.3 } }
+        // → { socket_shelf: { on: v.enabled, count: v.count, spacing: v.spacing, baseHeight: v.baseHeight } }
+        socketStates[k] = { on: !!v.enabled, count: v.count || 1, spacing: v.spacing || 0.3, baseHeight: v.baseHeight || 0.3 };
+      }
+    });
+    migrated = { ...migrated, socketStates, sockets: migrated.sockets }; // keep sockets for BP internal use
+  }
+  // Step 3: ensure toggleStates exists
+  if (!migrated.toggleStates) migrated = { ...migrated, toggleStates: {} };
+  return migrated;
+};
 
 function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
@@ -3611,10 +3632,23 @@ export default function BoothPlannerV2() {
     floorW, floorD, floorColor,
     floorPlan: floorPlan || null,
     // Normalize items: use modelId (unified format) + keep kind for BP internal use
-    items: items.map(({ catalogId, ...rest }) => ({
+    items: items.map(({ catalogId, sockets, ...rest }) => ({
       ...rest,
       modelId: catalogId,
       catalogId, // keep for backwards compat
+      // Unified format: socketStates from internal sockets state
+      socketStates: (() => {
+        const states = {};
+        Object.entries(sockets || {}).forEach(([k, v]) => {
+          if (typeof v === 'boolean') {
+            states[k] = { on: v };
+          } else if (v && typeof v === 'object') {
+            states[k] = { on: !!v.enabled, count: v.count || 1, spacing: v.spacing || 0.3, baseHeight: v.baseHeight || 0.3 };
+          }
+        });
+        return states;
+      })(),
+      toggleStates: rest.toggleStates || {},
     })),
     walls, cameras,
     catalogColors,
@@ -3631,9 +3665,23 @@ export default function BoothPlannerV2() {
     setFloorPlan(data.floorPlan || null);
     setItems((data.items || []).map(it => {
       // Accept both modelId (unified format) and catalogId (legacy BP format)
-      const migrated = migrateItem(it);
+      let migrated = migrateItem(it);
       if (migrated.modelId && !migrated.catalogId) {
-        return { ...migrated, catalogId: migrated.modelId, kind: migrated.kind || 'model' };
+        migrated = { ...migrated, catalogId: migrated.modelId, kind: migrated.kind || 'model' };
+      }
+      // Convert socketStates back to internal sockets format if needed
+      if (migrated.socketStates && !migrated.sockets) {
+        const sockets = {};
+        Object.entries(migrated.socketStates).forEach(([k, v]) => {
+          if (v && typeof v === 'object') {
+            if (v.count !== undefined) {
+              sockets[k] = { enabled: !!v.on, count: v.count, spacing: v.spacing || 0.3, baseHeight: v.baseHeight || 0.3 };
+            } else {
+              sockets[k] = !!v.on;
+            }
+          }
+        });
+        migrated = { ...migrated, sockets };
       }
       return migrated;
     }));
