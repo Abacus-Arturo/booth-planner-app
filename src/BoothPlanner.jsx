@@ -84,14 +84,14 @@ function getSocketBehavior(socketDef) {
 function getSocketName(s) { return typeof s === "string" ? s : s.name; }
 function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
 // Three.js GLB nodes may have numeric suffixes (.001, .002) — find by base name
-function getSocketObject(root, sName) {
-  let found = null;
+// idx: for duplicate socket names (e.g. 4x socket_lamp), pick the Nth match
+function getSocketObject(root, sName, idx = 0) {
+  const matches = [];
   root.traverse((child) => {
-    if (found) return;
     const base = child.name.replace(/\.\d+$/, '');
-    if (base === sName) found = child;
+    if (base === sName) matches.push(child);
   });
-  return found;
+  return matches[idx] || null;
 }
 
 function buildWallMesh(wall, allWalls = []) {
@@ -2839,13 +2839,18 @@ export default function BoothPlannerV2() {
       if (realModel) {
         applyColorToContainer(realModel, it.color || def.color || "#888888", def);
         // apply sockets: visibility for simple ones, shelf array for repeatable ones
+        const socketNameIdx = {};
         (def.sockets || []).forEach((socketDef) => {
           const sName = getSocketName(socketDef);
+          const isDup = (def.sockets || []).filter(s => getSocketName(s) === sName).length > 1;
+          const sockIdx = socketNameIdx[sName] ?? 0;
+          socketNameIdx[sName] = sockIdx + 1;
+          const stateKey = isDup ? sName + '_' + sockIdx : sName;
           const accessoryFile = getSocketAccessoryFile(socketDef);
-          const socketObj = getSocketObject(realModel, sName);
+          const socketObj = getSocketObject(realModel, sName, sockIdx);
           if (!socketObj) return;
           if (isRepeatableSocket(sName)) {
-            const cfg = (it.sockets && it.sockets[sName]) || null;
+            const cfg = (it.sockets && (it.sockets[stateKey] || it.sockets[sName])) || null;
             const wantCount = cfg && cfg.enabled ? Math.max(1, cfg.count || 1) : 0;
             const existing = socketObj.children.filter((c) => c.userData.isShelfClone);
             // remove excess
@@ -2879,7 +2884,7 @@ export default function BoothPlannerV2() {
             const baseHeight = (cfg && cfg.baseHeight) || 0.3;
             socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
           } else {
-            const on = !!(it.sockets && it.sockets[sName]);
+            const on = !!(it.sockets && (it.sockets[stateKey] !== undefined ? it.sockets[stateKey] : it.sockets[sName]));
             const accessoryFile = getSocketAccessoryFile(socketDef);
             const existing = socketObj.children.find((c) => c.userData.isAccessory);
             if (on && !existing) {
