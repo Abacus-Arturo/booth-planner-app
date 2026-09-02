@@ -3765,7 +3765,6 @@ export default function BoothPlannerV2() {
       // Unified format: socketStates from internal sockets state
 socketStates: (() => {
         const states = {};
-        console.log('[buildProjectData] sockets for', catalogId, sockets);
         Object.entries(sockets || {}).forEach(([k, v]) => {
           if (typeof v === 'boolean') {
             states[k] = { on: v };
