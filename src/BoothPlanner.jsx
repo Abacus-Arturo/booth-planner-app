@@ -1731,7 +1731,7 @@ export default function BoothPlannerV2() {
             dist = Math.round(dist / snapUnit) * snapUnit;
           }
           // no overlap: distancia mínima = ancho del objeto × copias
-          const minDist = (def?.w || 1) * n;
+          const minDist = (def?._measuredW || def?.w || 1) * n;
           dist = Math.max(Math.max(0.1, dist), minDist);
           const endPt = new THREE.Vector3(
             origin.x + Math.sin(angle) * dist,
