@@ -5120,7 +5120,9 @@ socketStates: (() => {
                           <input type="number" step="0.1"
                             value={fmt(metersTo(currentGap, unit))}
                             onChange={(e) => {
-                              const newGap = toMeters(parseFloat(e.target.value) || 0, unit);
+                              const parsed = parseFloat(e.target.value);
+                              if (isNaN(parsed)) return;
+                              const newGap = toMeters(parsed, unit);
                               const newCenterToCenter = objWidth + newGap;
                               setItems((prev) => prev.map((it) => {
                                 if (!selectedUids.includes(it.uid)) return it;
