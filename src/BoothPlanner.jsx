@@ -755,8 +755,8 @@ export default function BoothPlannerV2() {
         measureModelDims(def.file)
           .then((dims) => {
             loaded++;
-            // Only use measured dims if manifest does not define them
-            setCatalog((prev) => prev.map((c) => (c.id === def.id ? { ...dims, ...c, _measured: true } : c)));
+            // Keep manifest display values (w/d/h) but store measured dims for physics/layout
+            setCatalog((prev) => prev.map((c) => (c.id === def.id ? { ...dims, ...c, _measuredW: dims.w, _measuredD: dims.d, _measuredH: dims.h, _measured: true } : c)));
             setManifestStatus({ type: "loading", message: `Loading models… (${loaded}/${modelsWithFile.length})` });
           })
           .catch((err) => {
@@ -1983,7 +1983,7 @@ export default function BoothPlannerV2() {
               ? itemsRef.current.filter((it) => getOuterGroupId(it) === existingGroupId)
               : [src];
             const def = findDefRef.current(src.kind, src.catalogId);
-            const objWidth = def?.w || 1;
+            const objWidth = def?._measuredW || def?.w || 1;
 
             // calcular espaciado actual
             let spacing = objWidth; // default: continuo (espaciado 0 entre bordes = ancho entre centros)
@@ -5067,7 +5067,7 @@ socketStates: (() => {
                     ? Math.hypot(sorted[1].x - sorted[0].x, sorted[1].z - sorted[0].z)
                     : (findDef(selItems[0].kind, selItems[0].catalogId)?.w || 1);
                   const def = findDef(selItems[0].kind, selItems[0].catalogId);
-                  const objWidth = def?.w || 1;
+                  const objWidth = def?._measuredW || def?.w || 1;
                   const centerToCenter = sorted.length >= 2
                     ? Math.hypot(sorted[1].x - sorted[0].x, sorted[1].z - sorted[0].z)
                     : objWidth;
