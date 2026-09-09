@@ -43,14 +43,56 @@ const getOuterGroupId = (it) => { const ids = getGroupIds(it); return ids.length
 const getInnerGroupId = (it) => { const ids = getGroupIds(it); return ids.length ? ids[0] : null; };
 const withOuterGroup = (it, gid) => ({ ...it, groupIds: [...getGroupIds(it), gid], groupId: undefined });
 const withoutOuterGroup = (it) => { const ids = getGroupIds(it); return { ...it, groupIds: ids.slice(0, -1), groupId: undefined }; };
-const migrateItem = (it) => it.groupIds ? it : { ...it, groupIds: it.groupId ? [it.groupId] : [], groupId: undefined };
+const migrateItem = (it) => {
+  // Step 1: migrate groupIds
+  let migrated = it.groupIds ? it : { ...it, groupIds: it.groupId ? [it.groupId] : [], groupId: undefined };
+  // Step 2: migrate sockets → socketStates (old BP format used 'sockets', new format uses 'socketStates')
+  if (migrated.sockets && !migrated.socketStates) {
+    const socketStates = {};
+    Object.entries(migrated.sockets).forEach(([k, v]) => {
+      if (typeof v === 'boolean') {
+        // old fixed socket: { socket_lamp: true } → { socket_lamp: { on: true } }
+        socketStates[k] = { on: v };
+      } else if (v && typeof v === 'object') {
+        // old repeatable: { socket_shelf: { enabled: true, count: 3, spacing: 0.3, baseHeight: 0.3 } }
+        // → { socket_shelf: { on: v.enabled, count: v.count, spacing: v.spacing, baseHeight: v.baseHeight } }
+        socketStates[k] = { on: !!v.enabled, count: v.count || 1, spacing: v.spacing || 0.3, baseHeight: v.baseHeight || 0.3 };
+      }
+    });
+    migrated = { ...migrated, socketStates, sockets: migrated.sockets }; // keep sockets for BP internal use
+  }
+  // Step 3: ensure toggleStates exists
+  if (!migrated.toggleStates) migrated = { ...migrated, toggleStates: {} };
+  return migrated;
+};
 
 function isRepeatableSocket(socketName) {
   return socketName.includes("shelf");
 }
+// Returns the behavior of a socket def: 'fixed' | 'distribute' | 'positions' | 'toggle_mesh'
+// Falls back to name-based detection for legacy manifests without behavior field
+function getSocketBehavior(socketDef) {
+  if (!socketDef) return 'fixed';
+  if (typeof socketDef === 'string') return socketDef.includes('shelf') ? 'distribute' : 'fixed';
+  if (socketDef.behavior) return socketDef.behavior;
+  // Legacy fallback: detect by name
+  const name = socketDef.name || '';
+  if (name.includes('shelf')) return 'distribute';
+  return 'fixed';
+}
 // sockets en el manifest pueden ser string ("socket_shelf") u objeto ({name, accessoryFile})
 function getSocketName(s) { return typeof s === "string" ? s : s.name; }
 function getSocketAccessoryFile(s) { return typeof s === "string" ? null : (s.accessoryFile || null); }
+// Three.js GLB nodes may have numeric suffixes (.001, .002) — find by base name
+// idx: for duplicate socket names (e.g. 4x socket_lamp), pick the Nth match
+function getSocketObject(root, sName, idx = 0) {
+  const matches = [];
+  root.traverse((child) => {
+    const base = child.name.replace(/\.\d+$/, '');
+    if (base === sName) matches.push(child);
+  });
+  return matches[idx] || null;
+}
 
 function buildWallMesh(wall, allWalls = []) {
   // Door
@@ -526,6 +568,9 @@ function generateThumbnail(scene3DObject, color) {
       renderer.render(scene, camera);
       const dataURL = renderer.domElement.toDataURL("image/png");
       renderer.dispose();
+      // Force WebGL context loss so the browser can free the context slot
+      const ext = renderer.getContext().getExtension('WEBGL_lose_context');
+      if (ext) ext.loseContext();
       resolve(dataURL);
     } catch (e) {
       resolve(null);
@@ -622,6 +667,9 @@ export default function BoothPlannerV2() {
   const [wallToolActive, setWallToolActive] = useState(false);
   const wallSessionIdRef = useRef(null);
   const [floorDark, setFloorDark] = useState(false);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const snapEnabledRef = useRef(true);
+  useEffect(() => { snapEnabledRef.current = snapEnabled; }, [snapEnabled]);
   const floorColorRef = useRef("#878787");
   useEffect(() => { floorColorRef.current = floorColor; }, [floorColor]);
   const [measureToolActive, setMeasureToolActive] = useState(false);
@@ -804,6 +852,26 @@ export default function BoothPlannerV2() {
     floor.receiveShadow = true;
     scene.add(floor);
     // (grid de referencia removido a petición — el piso queda limpio)
+
+    // ---- Snap guide line ----
+    const snapLineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-1, 0.01, 0), new THREE.Vector3(1, 0.01, 0)
+    ]);
+    const snapLineMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, linewidth: 2 });
+    const snapLine = new THREE.Line(snapLineGeo, snapLineMat);
+    snapLine.visible = false;
+    scene.add(snapLine);
+
+    function showSnapLine(x1, z1, x2, z2) {
+      const pts = [new THREE.Vector3(x1, 0.01, z1), new THREE.Vector3(x2, 0.01, z2)];
+      snapLine.geometry.setFromPoints(pts);
+      snapLine.visible = true;
+    }
+    function hideSnapLine() { snapLine.visible = false; }
+
+    const SOCKET_SNAP_R = 0.12; // meters
+    const AXIS_SNAP_R   = 0.06;
+    const AXIS_SEARCH_R = 2.0;
 
     // ---- Orbit (manual) ----
     const target = new THREE.Vector3(0, 0, 0);
@@ -1821,9 +1889,84 @@ export default function BoothPlannerV2() {
         return;
       }
       const pt = groundPoint(e.clientX, e.clientY);
-      threeRef.current.moveGroup(dragOffsetsRef.current, pt.x, pt.z);
+
+      // ── Socket snap ──────────────────────────────────────────
+      const dragOffsets = dragOffsetsRef.current;
+      const draggingUids = new Set(Object.keys(dragOffsets));
+
+      // Collect snap points of dragged objects using RAW position (before snap offset)
+      // This prevents the feedback loop that causes jitter
+      const dragSnapPts = [];
+      Object.entries(dragOffsets).forEach(([uid, off]) => {
+        const obj = itemGroup.children.find(x => x.userData.uid === uid);
+        if (!obj || !obj.userData.snapPoints?.length) return;
+        const rawX = pt.x + off.dx;
+        const rawZ = pt.z + off.dz;
+        obj.userData.snapPoints.forEach(sp => {
+          dragSnapPts.push({ x: rawX + sp.x, z: rawZ + sp.z });
+        });
+      });
+
+      let snapDX = 0, snapDZ = 0, bestSnapDist = SOCKET_SNAP_R;
+      const snapActive = snapEnabledRef?.current ?? true;
+      let axisLockX = null, axisLockZ = null;
+
+      if (dragSnapPts.length > 0 && snapActive) {
+        // 1. Socket snap
+        itemGroup.children.forEach(staticObj => {
+          if (draggingUids.has(staticObj.userData.uid)) return;
+          if (!staticObj.userData.snapPoints?.length) return;
+          staticObj.userData.snapPoints.forEach(sp => {
+            const wx = staticObj.position.x + sp.x;
+            const wz = staticObj.position.z + sp.z;
+            dragSnapPts.forEach(dp => {
+              const dist = Math.sqrt((dp.x - wx) ** 2 + (dp.z - wz) ** 2);
+              if (dist < bestSnapDist) {
+                bestSnapDist = dist;
+                snapDX = wx - dp.x;
+                snapDZ = wz - dp.z;
+              }
+            });
+          });
+        });
+
+        // 2. Axis snap — only if no socket snap
+        if (bestSnapDist >= SOCKET_SNAP_R) {
+          itemGroup.children.forEach(staticObj => {
+            if (draggingUids.has(staticObj.userData.uid)) return;
+            if (!staticObj.userData.snapPoints?.length) return;
+            staticObj.userData.snapPoints.forEach(sp => {
+              const wx = staticObj.position.x + sp.x;
+              const wz = staticObj.position.z + sp.z;
+              dragSnapPts.forEach(dp => {
+                const dist = Math.sqrt((dp.x - wx) ** 2 + (dp.z - wz) ** 2);
+                if (dist > AXIS_SEARCH_R) return;
+                if (Math.abs(dp.x - wx) < AXIS_SNAP_R && axisLockX === null) axisLockX = wx - dp.x;
+                if (Math.abs(dp.z - wz) < AXIS_SNAP_R && axisLockZ === null) axisLockZ = wz - dp.z;
+              });
+            });
+          });
+        }
+      }
+
+      let finalDX = 0, finalDZ = 0;
+      if (bestSnapDist < SOCKET_SNAP_R) {
+        finalDX = snapDX; finalDZ = snapDZ;
+        const dp = dragSnapPts[0];
+        if (dp) showSnapLine(dp.x + finalDX - 0.5, dp.z + finalDZ, dp.x + finalDX + 0.5, dp.z + finalDZ);
+      } else if (axisLockX !== null || axisLockZ !== null) {
+        finalDX = axisLockX || 0; finalDZ = axisLockZ || 0;
+        const cx = pt.x + finalDX, cz = pt.z + finalDZ;
+        if (axisLockX !== null) showSnapLine(cx, cz - 3, cx, cz + 3);
+        else showSnapLine(cx - 3, cz, cx + 3, cz);
+      } else {
+        hideSnapLine();
+      }
+
+      threeRef.current.moveGroup(dragOffsets, pt.x + finalDX, pt.z + finalDZ);
     };
     const onUpDrag = () => {
+      hideSnapLine();
       draggingUid = null;
       draggingWallUid = null;
       if (draggingWallHandleRef.current?.type === 'array') {
@@ -2676,6 +2819,53 @@ export default function BoothPlannerV2() {
             container.add(root);
             applyColorToContainer(root, it.color || def.color || "#888888", def);
             applySocketVisibility(root, it.sockets);
+
+            // Extract snap_ empties from GLB for snap system
+            const snapPoints = [];
+            root.traverse((child) => {
+              if (!child.name || !child.name.startsWith('snap_')) return;
+              const wp = new THREE.Vector3();
+              child.getWorldPosition(wp);
+              snapPoints.push({ name: child.name, x: wp.x - container.position.x, z: wp.z - container.position.z });
+            });
+            container.userData.snapPoints = snapPoints;
+
+            // Detect toggle_ meshes and apply toggleStates
+            const toggleMeshes = [];
+            const toggleGroupCounts = {};
+            root.traverse((child) => {
+              if (!child.name) return;
+              const base = child.name.replace(/\.\d+$/, '');
+              if (!base.toLowerCase().startsWith('toggle_')) return;
+              const parts = base.slice(7).split('_');
+              if (parts.length >= 2) {
+                toggleGroupCounts[parts[0]] = (toggleGroupCounts[parts[0]] || 0) + 1;
+              }
+            });
+            root.traverse((child) => {
+              if (!child.name) return;
+              const base = child.name.replace(/\.\d+$/, '');
+              if (!base.toLowerCase().startsWith('toggle_')) return;
+              const parts = base.slice(7).split('_');
+              const isRealGroup = parts.length >= 2 && toggleGroupCounts[parts[0]] > 1;
+              const group = isRealGroup ? parts[0] : null;
+              const variant = isRealGroup ? parts.slice(1).join('_') : null;
+              toggleMeshes.push({ name: child.name, base, group, variant });
+              // Default visibility: simple = off, group = first variant on
+              if (isRealGroup) {
+                const groupMembers = toggleMeshes.filter(t => t.group === group);
+                child.visible = groupMembers.length === 1; // first = visible
+              } else {
+                child.visible = false;
+              }
+            });
+            container.userData.toggleMeshes = toggleMeshes;
+            // Apply saved toggleStates
+            if (it.toggleStates) {
+              Object.entries(it.toggleStates).forEach(([meshName, visible]) => {
+                root.traverse((child) => { if (child.name === meshName) child.visible = visible; });
+              });
+            }
             // calcular el bounding box en espacio LOCAL del root (antes de la rotación del container)
             // para que el outline siempre tenga el tamaño correcto sin importar la rotación
             const tempParent = new THREE.Group();
@@ -2758,13 +2948,18 @@ export default function BoothPlannerV2() {
       if (realModel) {
         applyColorToContainer(realModel, it.color || def.color || "#888888", def);
         // apply sockets: visibility for simple ones, shelf array for repeatable ones
+        const socketNameIdx = {};
         (def.sockets || []).forEach((socketDef) => {
           const sName = getSocketName(socketDef);
+          const isDup = (def.sockets || []).filter(s => getSocketName(s) === sName).length > 1;
+          const sockIdx = socketNameIdx[sName] ?? 0;
+          socketNameIdx[sName] = sockIdx + 1;
+          const stateKey = isDup ? sName + '_' + sockIdx : sName;
           const accessoryFile = getSocketAccessoryFile(socketDef);
-          const socketObj = realModel.getObjectByName(sName);
+          const socketObj = getSocketObject(realModel, sName, sockIdx);
           if (!socketObj) return;
           if (isRepeatableSocket(sName)) {
-            const cfg = (it.sockets && it.sockets[sName]) || null;
+            const cfg = (it.sockets && (it.sockets[stateKey] || it.sockets[sName])) || null;
             const wantCount = cfg && cfg.enabled ? Math.max(1, cfg.count || 1) : 0;
             const existing = socketObj.children.filter((c) => c.userData.isShelfClone);
             // remove excess
@@ -2798,7 +2993,7 @@ export default function BoothPlannerV2() {
             const baseHeight = (cfg && cfg.baseHeight) || 0.3;
             socketObj.children.filter((c) => c.userData.isShelfClone).forEach((c, i) => { c.position.y = baseHeight + i * spacing; });
           } else {
-            const on = !!(it.sockets && it.sockets[sName]);
+            const on = !!(it.sockets && (it.sockets[stateKey] !== undefined ? it.sockets[stateKey] : it.sockets[sName]));
             const accessoryFile = getSocketAccessoryFile(socketDef);
             const existing = socketObj.children.find((c) => c.userData.isAccessory);
             if (on && !existing) {
@@ -2822,6 +3017,12 @@ export default function BoothPlannerV2() {
             }
           }
         });
+        // Apply toggle mesh states
+        if (it.toggleStates) {
+          Object.entries(it.toggleStates).forEach(([meshName, visible]) => {
+            realModel.traverse((child) => { if (child.name === meshName) child.visible = visible; });
+          });
+        }
       } else {
         const placeholder = container.children.find((c) => c.userData.isPlaceholder);
         if (placeholder) {
@@ -3346,33 +3547,34 @@ export default function BoothPlannerV2() {
   };
   const duplicateSelectedRef = useRef(() => {});
   useEffect(() => { duplicateSelectedRef.current = duplicateSelected; });
-  const toggleSocket = (sName) => {
+  const toggleSocket = (sName, stateKey) => {
+    const key = stateKey || sName;
     if (!selectedItem) return;
     const buildNewSockets = (current) => {
       const sockets = { ...(current || {}) };
       if (isRepeatableSocket(sName)) {
-        const cur = sockets[sName];
-        sockets[sName] = cur && cur.enabled
+        const cur = sockets[key] || sockets[sName];
+        sockets[key] = cur && cur.enabled
           ? { ...cur, enabled: false }
           : { enabled: true, count: (cur && cur.count) || 1, spacing: (cur && cur.spacing) || 0.3, baseHeight: (cur && cur.baseHeight) || 0.3 };
       } else {
-        sockets[sName] = !sockets[sName];
+        sockets[key] = !sockets[key];
       }
       return sockets;
     };
     // si hay grupo completo seleccionado (2+ piezas del mismo grupo), propagar a todos
     const isWholeGroup = selectedUids.length > 1 && getOuterGroupId(selectedItem) &&
       items.filter((it) => selectedUids.includes(it.uid)).every((it) => getOuterGroupId(it) === getOuterGroupId(selectedItem));
-    if (isWholeGroup) {
-      setItems((prev) => prev.map((it) =>
-        selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it
-      ));
-    } else {
-      updateSelected({ sockets: buildNewSockets(selectedItem.sockets) });
-    }
+    setItems((prev) => prev.map((it) => {
+      if (isWholeGroup) {
+        return selectedUids.includes(it.uid) ? { ...it, sockets: buildNewSockets(it.sockets) } : it;
+      }
+      return it.uid === selectedUid ? { ...it, sockets: buildNewSockets(it.sockets) } : it;
+    }));
   };
 
-  const updateSocketConfig = (sName, patch) => {
+  const updateSocketConfig = (sName, patch, stateKey) => {
+    const key = stateKey || sName;
     if (!selectedItem) return;
     const buildNewSockets = (current) => {
       const sockets = { ...(current || {}) };
@@ -3390,6 +3592,26 @@ export default function BoothPlannerV2() {
       updateSelected({ sockets: buildNewSockets(selectedItem.sockets) });
     }
   };
+  const toggleMesh = (meshName, group) => {
+    if (!selectedItem) return;
+    setItems((prev) => prev.map((it) => {
+      if (it.uid !== selectedUid) return it;
+      const toggleStates = { ...(it.toggleStates || {}) };
+      if (group) {
+        // Mutually exclusive: turn on this variant, turn off others in same group
+        const { itemGroup } = threeRef.current;
+        const container = itemGroup?.children.find((c) => c.userData.uid === it.uid);
+        const allToggleMeshes = container?.userData?.toggleMeshes || [];
+        allToggleMeshes.filter(t => t.group === group).forEach(t => {
+          toggleStates[t.name] = t.name === meshName;
+        });
+      } else {
+        toggleStates[meshName] = !toggleStates[meshName];
+      }
+      return { ...it, toggleStates };
+    }));
+  };
+
   const replaceSelected = (newDef, newKind) => {
     if (!selectedItem) return;
     updateSelected({ catalogId: newDef.id, kind: newKind, color: newDef.color || "#888888", sockets: {} });
@@ -3528,14 +3750,33 @@ export default function BoothPlannerV2() {
 
   // ===================== File menu =====================
   const buildProjectData = () => ({
-    version: 1,
+    version: 2,
     name: projectName,
     savedAt: new Date().toISOString(),
     manifestUrl,
     unit,
     floorW, floorD, floorColor,
     floorPlan: floorPlan || null,
-    items, walls, cameras,
+    // Normalize items: use modelId (unified format) + keep kind for BP internal use
+    items: items.map(({ catalogId, sockets, ...rest }) => ({
+      ...rest,
+      modelId: catalogId,
+      catalogId, // keep for backwards compat
+      // Unified format: socketStates from internal sockets state
+socketStates: (() => {
+        const states = {};
+        Object.entries(sockets || {}).forEach(([k, v]) => {
+          if (typeof v === 'boolean') {
+            states[k] = { on: v };
+          } else if (v && typeof v === 'object') {
+            states[k] = { on: !!v.enabled, count: v.count || 1, spacing: v.spacing || 0.3, baseHeight: v.baseHeight || 0.3 };
+          }
+        });
+        return states;
+      })(),
+      toggleStates: rest.toggleStates || {},
+    })),
+    walls, cameras,
     catalogColors,
     wallConfig,
   });
@@ -3548,7 +3789,28 @@ export default function BoothPlannerV2() {
     if (data.floorD) setFloorD(data.floorD);
     if (data.floorColor) setFloorColor(data.floorColor);
     setFloorPlan(data.floorPlan || null);
-    setItems((data.items || []).map(migrateItem));
+    setItems((data.items || []).map(it => {
+      // Accept both modelId (unified format) and catalogId (legacy BP format)
+      let migrated = migrateItem(it);
+      if (migrated.modelId && !migrated.catalogId) {
+        migrated = { ...migrated, catalogId: migrated.modelId, kind: migrated.kind || 'model' };
+      }
+      // Convert socketStates back to internal sockets format if needed
+      if (migrated.socketStates && !migrated.sockets) {
+        const sockets = {};
+        Object.entries(migrated.socketStates).forEach(([k, v]) => {
+          if (v && typeof v === 'object') {
+            if (v.count !== undefined) {
+              sockets[k] = { enabled: !!v.on, count: v.count, spacing: v.spacing || 0.3, baseHeight: v.baseHeight || 0.3 };
+            } else {
+              sockets[k] = !!v.on;
+            }
+          }
+        });
+        migrated = { ...migrated, sockets };
+      }
+      return migrated;
+    }));
     setWalls(data.walls || []);
     setCameras(data.cameras || []);
     if (data.catalogColors) setCatalogColors(data.catalogColors);
@@ -4391,6 +4653,13 @@ export default function BoothPlannerV2() {
 
         {/* Camera panel button — below gizmo */}
         <div style={{ position: "absolute", top: 70, right: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+          {/* Snap toggle */}
+          <button onClick={() => setSnapEnabled(v => !v)}
+            title={snapEnabled ? "Disable snap" : "Enable snap"}
+            style={{ width: 36, height: 36, background: snapEnabled ? "rgba(91,75,255,0.2)" : "rgba(13,17,23,0.85)", border: `1px solid ${snapEnabled ? "#5b4bff" : "#1e2035"}`, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(8px)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={snapEnabled ? "#5b4bff" : "#64748b"} strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          </button>
+
           {/* Floor dark mode */}
           <button onClick={() => {
             const next = !floorDark;
@@ -4980,6 +5249,73 @@ export default function BoothPlannerV2() {
             </div>
           )}
 
+          {/* Toggle Meshes — feet, double sided, etc. */}
+          {(() => {
+            const { itemGroup } = threeRef.current;
+            const container = itemGroup?.children.find((c) => c.userData.uid === selectedUid);
+            const toggleMeshes = container?.userData?.toggleMeshes || [];
+            if (!toggleMeshes.length) return null;
+            // Deduplicate: groups show once, simples show individually
+            const shown = [];
+            const seenGroups = new Set();
+            toggleMeshes.forEach(t => {
+              if (t.group) {
+                if (!seenGroups.has(t.group)) { seenGroups.add(t.group); shown.push({ type: 'group', group: t.group }); }
+              } else {
+                shown.push({ type: 'simple', name: t.name, base: t.base });
+              }
+            });
+            const TOGGLE_LABELS = { 'toggle_back_panel': 'Double Sided' };
+            return (
+              <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Options</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {shown.map((item) => {
+                    if (item.type === 'simple') {
+                      const isOn = !!(selectedItem?.toggleStates?.[item.name]);
+                      const label = TOGGLE_LABELS[item.base] || item.base.slice(7).replace(/_/g, ' ').replace(/\w/g, c => c.toUpperCase());
+                      return (
+                        <div key={item.name} onClick={() => toggleMesh(item.name, null)}
+                          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", padding: "6px 0" }}>
+                          <span style={{ fontSize: 12, color: isOn ? "#e2e8f0" : "#64748b" }}>{label}</span>
+                          <div style={{ width: 36, height: 20, background: isOn ? "#5b4bff" : "#1e2035", border: isOn ? "none" : "1px solid #2a2f4a", borderRadius: 10, position: "relative", flexShrink: 0 }}>
+                            <div style={{ width: 16, height: 16, background: isOn ? "#fff" : "#475569", borderRadius: "50%", position: "absolute", top: 2, left: isOn ? 18 : 2 }} />
+                          </div>
+                        </div>
+                      );
+                    } else {
+                      // Group: radio buttons for each variant
+                      const groupMeshes = toggleMeshes.filter(t => t.group === item.group);
+                      const activeVariant = groupMeshes.find(t => selectedItem?.toggleStates?.[t.name] === true)?.name
+                        || groupMeshes[0]?.name;
+                      const label = item.group.replace(/_/g, ' ').replace(/\w/g, c => c.toUpperCase());
+                      return (
+                        <div key={item.group}>
+                          <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>{label}</div>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {groupMeshes.map(t => {
+                              const varLabel = t.variant.replace(/_/g, ' ').replace(/\w/g, c => c.toUpperCase());
+                              const isActive = activeVariant === t.name;
+                              return (
+                                <button key={t.name} onClick={() => toggleMesh(t.name, item.group)}
+                                  style={{ flex: 1, padding: "5px 8px", fontSize: 11, fontWeight: 600, borderRadius: 7, cursor: "pointer",
+                                    border: `1px solid ${isActive ? "#5b4bff" : "#1e2035"}`,
+                                    background: isActive ? "#5b4bff" : "#0d0f18",
+                                    color: isActive ? "#fff" : "#64748b" }}>
+                                  {varLabel}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    }
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Rotation */}
           <div style={{ background: "#13162a", border: "1px solid #1e2035", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Rotation</div>
@@ -5037,10 +5373,13 @@ export default function BoothPlannerV2() {
             <div style={{ marginBottom: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>Accessories</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {selectedDef.sockets.map((s) => {
+                {selectedDef.sockets.map((s, sockIdx) => {
                   const sName = getSocketName(s);
+                  const isDup = selectedDef.sockets.filter(x => getSocketName(x) === sName).length > 1;
+                  const dupIdx = selectedDef.sockets.slice(0, sockIdx).filter(x => getSocketName(x) === sName).length;
+                  const stateKey = isDup ? sName + '_' + dupIdx : sName;
                   const repeatable = isRepeatableSocket(sName);
-                  const cfg = selectedItem.sockets && selectedItem.sockets[sName];
+                  const cfg = selectedItem.sockets && (selectedItem.sockets[stateKey] !== undefined ? selectedItem.sockets[stateKey] : selectedItem.sockets[sName]);
                   const isOn = repeatable ? !!(cfg && cfg.enabled) : !!cfg;
                   const isLamp = sName.includes("lamp");
                   const accentColor = isLamp ? "#f59e0b" : "#818cf8";
@@ -5050,8 +5389,8 @@ export default function BoothPlannerV2() {
                     ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={isOn ? accentColor : "#475569"} strokeWidth="2"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.3 6H8.3C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/></svg>
                     : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={isOn ? accentColor : "#475569"} strokeWidth="2"><rect x="2" y="3" width="20" height="4" rx="1"/><rect x="2" y="10" width="20" height="4" rx="1"/><rect x="2" y="17" width="20" height="4" rx="1"/></svg>;
                   return (
-                    <div key={sName} style={{ borderRadius: 10, border: `1.5px solid ${isOn ? accentBorder : "#1e2035"}`, background: isOn ? accentBg : "#13162a", overflow: "hidden" }}>
-                      <div onClick={() => toggleSocket(sName)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "pointer" }}>
+                    <div key={stateKey} style={{ borderRadius: 10, border: `1.5px solid ${isOn ? accentBorder : "#1e2035"}`, background: isOn ? accentBg : "#13162a", overflow: "hidden" }}>
+                      <div onClick={() => toggleSocket(sName, stateKey)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "pointer" }}>
                         <div style={{ width: 32, height: 32, borderRadius: 8, background: isOn ? `${accentColor}22` : "#1e2035", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                           {icon}
                         </div>
@@ -5100,8 +5439,8 @@ export default function BoothPlannerV2() {
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                             <span style={{ fontSize: 10, color: "#64748b", width: 72 }}>Base height</span>
-                            <input type="number" min="0" step="0.05" value={fmt(metersTo(cfg.baseHeight, unit))}
-                              onChange={(e) => updateSocketConfig(sName, { baseHeight: Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit)) })}
+                            <input type="number" step="0.05" value={fmt(metersTo(cfg.baseHeight, unit))}
+                              onChange={(e) => updateSocketConfig(sName, { baseHeight: toMeters(parseFloat(e.target.value) || 0, unit) })}
                               style={{ ...inputStyle, flex: 1 }} />
                             <span style={{ fontSize: 10, color: "#475569" }}>{UNITS[unit].label}</span>
                           </div>
