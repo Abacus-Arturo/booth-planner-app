@@ -2397,10 +2397,13 @@ export default function BoothPlannerV2() {
         const origContainer = itemGroup.children.find((c) => c.userData.uid === src.uid);
         if (origContainer) origContainer.rotation.y = baseAngle;
         const makeGhost = (pos, colorIdx) => {
-          const geo = new THREE.BoxGeometry(def.w || 1, def.h || 1, def.d || 1);
+          const gw = def._measuredW || def.w || 1;
+          const gh = def._measuredH || def.h || 1;
+          const gd = def._measuredD || def.d || 1;
+          const geo = new THREE.BoxGeometry(gw, gh, gd);
           const mat = new THREE.MeshStandardMaterial({ color: varyColor(src.color || def.color || "#888888", colorIdx), roughness: 0.45, metalness: 0.15, transparent: true, opacity: 0.45 });
           const ghost = new THREE.Mesh(geo, mat);
-          ghost.position.set(pos.x, (def.h || 1) / 2, pos.z);
+          ghost.position.set(pos.x, gh / 2, pos.z);
           ghost.rotation.y = baseAngle;
           ghostGroup.add(ghost);
         };
