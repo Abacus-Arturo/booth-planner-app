@@ -5120,10 +5120,12 @@ socketStates: (() => {
                         </div>
                         <div style={{ flex: 1 }}>
                           <div style={{ fontSize: 9, color: "#475569", marginBottom: 3 }}>Spacing ({UNITS[unit].label})</div>
-                          <input type="number" min="0" step="0.1"
-                            value={fmt(metersTo(Math.max(0, currentGap), unit))}
+                          <input type="number" step={currentGap < 0 ? "0.01" : "0.1"}
+                            value={fmt(metersTo(currentGap, unit))}
                             onChange={(e) => {
-                              const newGap = Math.max(0, toMeters(parseFloat(e.target.value) || 0, unit));
+                              const parsed = parseFloat(e.target.value);
+                              if (isNaN(parsed)) return;
+                              const newGap = toMeters(parsed, unit);
                               const newCenterToCenter = objWidth + newGap;
                               setItems((prev) => prev.map((it) => {
                                 if (!selectedUids.includes(it.uid)) return it;
