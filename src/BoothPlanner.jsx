@@ -5117,7 +5117,7 @@ socketStates: (() => {
                         </div>
                         <div style={{ flex: 1 }}>
                           <div style={{ fontSize: 9, color: "#475569", marginBottom: 3 }}>Spacing ({UNITS[unit].label})</div>
-                          <input type="number" step="0.1"
+                          <input type="number" step={currentGap < 0 ? "0.01" : "0.1"}
                             value={fmt(metersTo(currentGap, unit))}
                             onChange={(e) => {
                               const parsed = parseFloat(e.target.value);
