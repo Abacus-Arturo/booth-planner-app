@@ -755,7 +755,8 @@ export default function BoothPlannerV2() {
         measureModelDims(def.file)
           .then((dims) => {
             loaded++;
-            setCatalog((prev) => prev.map((c) => (c.id === def.id ? { ...c, ...dims, _measured: true } : c)));
+            // Only use measured dims if manifest does not define them
+            setCatalog((prev) => prev.map((c) => (c.id === def.id ? { ...dims, ...c, _measured: true } : c)));
             setManifestStatus({ type: "loading", message: `Loading models… (${loaded}/${modelsWithFile.length})` });
           })
           .catch((err) => {
